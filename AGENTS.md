@@ -14,9 +14,9 @@ ESP32-C3 USB Telegram bridge with GPIO. ESP-IDF v5.5.2, plain C.
 
 ```bash
 scripts/idf.sh idf.py build                   # run one command inside ESP-IDF (self-contained root ~/code/esp-idf_5.5.2)
-scripts/idf.sh idf.py -p /dev/cu.usbmodem11101 flash   # board port; check `ls /dev/cu.usbmodem*`; one agent at a time (see 5)
+scripts/hw.sh idf.py -p /dev/cu.usbmodem11101 flash    # board port; check `ls /dev/cu.usbmodem*`; holds the board lock (see 5)
 scripts/test_host.sh                          # host unit tests (Unity+cJSON, build-host/, CTest); non-zero on failure
-scripts/idf.sh python tools/embpet_cli.py sys info   # one CLI command over serial
+scripts/hw.sh python tools/embpet_cli.py sys info    # one CLI command over serial
 ```
 
 Agents: always go through `scripts/idf.sh`. Never source `scripts/export.sh` in a tool call, because Claude Code never auto-allows sourcing, so the call blocks on a permission prompt (or is auto-denied in unmanned mode). Interactive shells can still use `. scripts/export.sh`.
@@ -33,7 +33,7 @@ Never install ESP-IDF into `~/.espressif` or `~/esp`. A new version gets its own
    - Host tests are green.
    - README and skills are updated when a command, event or behaviour changed.
    - No TODOs, stubs, `#if 0`, skipped tests or placeholder handlers remain.
-5. **Hardware (label `hw`):** only **one** agent at a time may use `/dev/cu.usbmodem*`; flash, monitor and HIL all count. Wrap hardware commands in `flock /tmp/embpet-hw.lock …`. Close `idf.py monitor` before using `tools/embpet_cli.py` or pytest. Open the port with DTR=RTS=False; the tools already do this.
+5. **Hardware (label `hw`):** only **one** agent at a time may use `/dev/cu.usbmodem*`; flash, monitor and HIL all count. Run every hardware command through `scripts/hw.sh <cmd>`, which holds `/tmp/embpet-hw.lock` via `flock` (`brew install flock`) and runs the command inside ESP-IDF. Don't call `flock /tmp/…` directly; the `/tmp` path argument makes the call prompt. Close `idf.py monitor` before using `tools/embpet_cli.py` or pytest. Open the port with DTR=RTS=False; the tools already do this.
 6. **Agent routing:**
 
    | Work | Agent |
