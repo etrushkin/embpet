@@ -265,6 +265,21 @@ idf.py -p /dev/cu.usbmodem11101 flash monitor
 
 Provisioning is done through the CLI; see the `wifi-connect` skill in `skills/`.
 
+### Testing
+
+Pure logic (escape decoding, pending table, prefix parsing, pulse/debounce, LED pattern,
+JSON frame building) lives in `components/<comp>/*_core.c/.h` with no ESP-IDF includes;
+time is passed in as `uint64_t now_ms`. These are unit-tested natively on the Mac:
+
+```bash
+scripts/test_host.sh     # configure + build in build-host/, run via CTest; non-zero on failure
+```
+
+The harness is a standalone CMake project in `test/host/` using Unity and cJSON from
+`$IDF_PATH/components`. To add a test, create `test/host/<name>/test_<name>.c` (Unity, own
+`main()`) and register it in `test/host/CMakeLists.txt` with `embpet_add_host_test(NAME ...
+SOURCES ... INCLUDES ... [WITH_CJSON])`. Host tests are built with `-Wall -Wextra -Werror`.
+
 ---
 
 ## 6. Planned repo layout

@@ -13,12 +13,13 @@ ESP32-C3 USB Telegram bridge with GPIO. ESP-IDF v5.5.2, plain C.
 ### Build & Test
 
 ```bash
-. scripts/export.sh                           # activate ESP-IDF (self-contained root ~/code/esp-idf_5.5.2)
-idf.py build
-idf.py -p /dev/cu.usbmodem11101 flash         # board port; check `ls /dev/cu.usbmodem*`
-scripts/test_host.sh                          # host unit tests (once created)
-python tools/embpet_cli.py sys info           # one CLI command over serial
+scripts/idf.sh idf.py build                   # run one command inside ESP-IDF (self-contained root ~/code/esp-idf_5.5.2)
+scripts/idf.sh idf.py -p /dev/cu.usbmodem11101 flash   # board port; check `ls /dev/cu.usbmodem*`; one agent at a time (see 5)
+scripts/test_host.sh                          # host unit tests (Unity+cJSON, build-host/, CTest); non-zero on failure
+scripts/idf.sh python tools/embpet_cli.py sys info   # one CLI command over serial
 ```
+
+Agents: always go through `scripts/idf.sh`. Never source `scripts/export.sh` in a tool call, because Claude Code never auto-allows sourcing, so the call blocks on a permission prompt (or is auto-denied in unmanned mode). Interactive shells can still use `. scripts/export.sh`.
 
 Never install ESP-IDF into `~/.espressif` or `~/esp`. A new version gets its own root via `scripts/bootstrap.sh <root> -v <tag>`.
 

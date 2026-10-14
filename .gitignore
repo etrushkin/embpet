@@ -10,8 +10,13 @@
 
 # ESP-IDF build output
 build/
+build-host/
+sdkconfig
 sdkconfig.old
 managed_components/
+
+# Permission-prompt log written by .claude/hooks/permission-gate.sh
+PERMISSIONS.md
 
 # Agent/tool state (local only)
 .omc/
