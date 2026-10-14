@@ -41,11 +41,19 @@ Never install ESP-IDF into `~/.espressif` or `~/esp`. A new version gets its own
    | Beads labelled `model-opus` | `executor` with `model=opus` |
    | Test-heavy work | `test-engineer` |
    | End of an epic | `verifier` |
-   | Before proposing a commit | `code-reviewer` |
+   | Before committing | `code-reviewer` |
    | Docs | `writer` |
    | ESP-IDF API questions | Read `$IDF_PATH` sources first, then `document-specialist` |
 7. **Human items** (label `human`, `bd human list`): ask the user early so they don't block the critical path.
-8. **Git:** no commits or pushes without explicit user approval. At the end of an epic, propose the files and a commit message, then wait.
+8. **Git:** this repository **opts in to the Team-maintainer profile** (see the Beads block below). Agents commit and push without asking:
+   - Commit when a task is verified and closed: one focused commit per task. The message is `<area>: <summary>` plus a `Bead: <id>` line, and ends with the agent's Co-Authored-By trailer.
+   - Before each commit:
+     - Stage explicit paths, never `git add -A`.
+     - Run `git diff --cached` and check that it contains no secrets (see 9).
+     - Confirm the build and host tests are green.
+   - Push to `origin` after each commit (`git pull --rebase` first if the push is rejected).
+   - **Never** force-push, rewrite published history, or run `git reset --hard`; these still need the user. Don't commit broken builds or work in progress to `main`.
+   - An explicit "don't commit" or "don't push" from the user always wins.
 9. **Secrets:** `WIFI_SSID`, `WIFI_PASS` and `TG_TOKEN` exist only in the git-ignored `.env.local`. Load them with `set -a; . ./.env.local; set +a`. Never print them or copy them into code, skills, beads, logs or commits.
 
 > **Architecture in one line:** Issues live in a local Dolt database

@@ -8,7 +8,7 @@ This file holds the **architecture** and the **verification strategy** only. It 
 |---|---|
 | Behaviour (spec) and review decisions | `README.md` (decisions in §8) |
 | Work items, status, dependencies, critical path, risks | beads (see §3) |
-| Workflow rules: hardware access, definition of done, agent routing, git, secrets | `AGENTS.md` → *Project workflow* |
+| Workflow rules: hardware access, definition of done, agent routing, secrets, and git (agents commit and push each verified task) | `AGENTS.md` → *Project workflow* |
 
 If this file disagrees with the README, the README wins. Fix this file in the same change.
 
