@@ -254,7 +254,7 @@ The last 32 events are kept in RAM. After a host reconnects it can replay them w
 
 ---
 
-## 5. Build and flash (planned)
+## 5. Build and flash
 
 ```bash
 . scripts/export.sh                  # default root ~/code/esp-idf_5.5.2, or pass another
@@ -262,6 +262,15 @@ idf.py set-target esp32c3            # once
 idf.py build
 idf.py -p /dev/cu.usbmodem11101 flash monitor
 ```
+
+`sdkconfig` is generated and git-ignored; `sdkconfig.defaults` is the source of truth
+(delete `sdkconfig` and rebuild to pick up changes to the defaults). The firmware version
+is `git describe --always --tags --dirty`, so an untagged repo yields a bare commit hash.
+
+Warnings: all project components build with `-Wall -Wextra -Werror` plus
+`-Wunused-parameter -Wsign-compare` and errors for unused variables and functions. They are
+set by `embpet_component_warnings()` in `cmake/embpet_warnings.cmake`, and the host tests use
+the same set, so target and host builds agree.
 
 Provisioning is done through the CLI; see the `wifi-connect` skill in `skills/`.
 
@@ -290,7 +299,11 @@ components/tgbot/     Telegram client: poller, sender, JSON, pending table
 components/proto/     @@ frame writer, event ring, common -a/-i options
 components/io/        outputs (pulse timers), inputs, boot levels, status LED
 components/netcfg/    Wi-Fi station + NVS config
-tools/embpet_cli.py   send one command, print the matching @@ response
+main/Kconfig.projbuild  "embpet" menu (limits and defaults)
+partitions.csv        nvs, phy_init, factory (3 MB, no OTA)
+sdkconfig.defaults    build configuration (sdkconfig itself is generated)
+cmake/                embpet_warnings.cmake, the shared warning policy
+tools/embpet_cli.py   send one command, print the matching @@ response; --monitor SEC [--reset] dumps raw console output
 scripts/bootstrap.sh  install a self-contained ESP-IDF into a given root
 scripts/export.sh     activate that ESP-IDF in the current shell (source it)
 skills/               agent skills (wifi-connect, …); symlinked into .claude/skills and .agents/skills (both git-ignored)

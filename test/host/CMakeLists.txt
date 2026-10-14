@@ -34,6 +34,9 @@ get_filename_component(EMBPET_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
 
 enable_testing()
 
+# Single source of truth for the warning set (defines EMBPET_WARNING_FLAGS; no IDF commands run).
+include(${EMBPET_ROOT}/cmake/embpet_warnings.cmake)
+
 # Third-party code is built without -Werror; project code and tests with it.
 add_library(unity STATIC "${UNITY_DIR}/unity.c")
 target_include_directories(unity SYSTEM PUBLIC "${UNITY_DIR}")
@@ -55,7 +58,7 @@ function(embpet_add_host_test)
     if(T_WITH_CJSON)
         target_link_libraries(${T_NAME} PRIVATE cjson)
     endif()
-    target_compile_options(${T_NAME} PRIVATE -Wall -Wextra -Werror)
+    target_compile_options(${T_NAME} PRIVATE ${EMBPET_WARNING_FLAGS})
     add_test(NAME ${T_NAME} COMMAND ${T_NAME})
 endfunction()
 
@@ -65,3 +68,14 @@ embpet_add_host_test(
     SOURCES  selftest/test_selftest.c selftest/selftest_core.c
     INCLUDES selftest
     WITH_CJSON)
+
+embpet_add_host_test(
+    NAME     prefix
+    SOURCES  prefix/test_prefix.c ${EMBPET_ROOT}/components/tgbot/prefix_core.c
+    INCLUDES ${EMBPET_ROOT}/components/tgbot/include)
+
+embpet_add_host_test(
+    NAME     pending
+    SOURCES  pending/test_pending.c ${EMBPET_ROOT}/components/tgbot/pending_core.c
+             ${EMBPET_ROOT}/components/tgbot/prefix_core.c
+    INCLUDES ${EMBPET_ROOT}/components/tgbot/include)

@@ -9,6 +9,13 @@ spaces or quotes are safe:  embpet_cli.py wifi set "my ssid" 'p"ss'
 
 Prints the response JSON on stdout. Exit codes: 0 = ok:true, 1 = ok:false,
 2 = timeout / serial error. See README.md section 3 for the protocol.
+
+Passthrough mode (no command is sent):
+  embpet_cli.py [-p PORT] --monitor SEC [--reset]
+
+Prints the raw serial output for SEC seconds and exits 0. With --reset the chip
+is reset first (RTS pulse on USB-Serial-JTAG), so the 2nd-stage bootloader log
+and the app banner are captured. Use it where `idf.py monitor` has no TTY.
 """
 import argparse
 import glob
@@ -52,6 +59,34 @@ def open_port(port):
     return s
 
 
+def monitor(port, seconds, reset):
+    try:
+        s = open_port(port or find_port())
+    except serial.SerialException as e:
+        print("serial error: %s" % e, file=sys.stderr)
+        return 2
+    try:
+        with s:
+            if reset:
+                # Same as esptool's HardReset(uses_usb=True): RTS high holds EN low.
+                s.rts = True
+                time.sleep(0.2)
+                s.rts = False
+                time.sleep(0.2)
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                data = s.read(4096)
+                if data:
+                    sys.stdout.buffer.write(data)
+                    sys.stdout.buffer.flush()
+    except serial.SerialException as e:
+        print("serial error: %s" % e, file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-p", "--port")
@@ -61,8 +96,23 @@ def main():
                     help="also print evt frames seen while waiting (stderr)")
     ap.add_argument("--raw", action="store_true",
                     help="print every console line to stderr")
-    ap.add_argument("cmd", nargs="+", help="command words, then arguments")
+    ap.add_argument("--monitor", type=float, metavar="SEC",
+                    help="print raw serial output for SEC seconds, then exit")
+    ap.add_argument("--reset", action="store_true",
+                    help="with --monitor: reset the chip first")
+    ap.add_argument("cmd", nargs="*", help="command words, then arguments")
     a = ap.parse_args()
+
+    if a.reset and a.monitor is None:
+        ap.error("--reset requires --monitor")
+    if a.monitor is not None:
+        if a.cmd:
+            ap.error("--monitor cannot be combined with a command")
+        if a.monitor <= 0:
+            ap.error("--monitor SEC must be greater than 0")
+        return monitor(a.port, a.monitor, a.reset)
+    if not a.cmd:
+        ap.error("a command is required (or --monitor SEC)")
 
     # The first two words are the command ("wifi set"); others are quoted args.
     words = a.cmd[:2] if len(a.cmd) >= 2 and a.cmd[0] in ("tg", "wifi", "io", "evt", "sys") else a.cmd[:1]
