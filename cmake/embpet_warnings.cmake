@@ -7,9 +7,14 @@
 # Once such a component gains SRCS the function switches to PRIVATE by itself.
 #
 # The flags are appended after IDF's own -Wno-* flags so that they win.
+#
+# -Wunused-parameter is deliberately absent: IDF's own inline headers (e.g. spinlock.h via
+# freertos/FreeRTOS.h) trip it, and IDF include dirs are not -isystem. Target builds keep
+# IDF's -Wno-unused-parameter; the host build has no -Wno-* flags, so -Wextra still enables
+# it there and the pure *_core.c files are checked for it.
 set(EMBPET_WARNING_FLAGS
     -Wall -Wextra -Werror
-    -Wunused-parameter -Wsign-compare
+    -Wsign-compare
     -Werror=unused-variable -Werror=unused-function -Werror=unused-but-set-variable)
 
 function(embpet_component_warnings)

@@ -1,0 +1,11 @@
+menu "embpet proto"
+
+    config EMBPET_PROTO_STRESS
+        bool "Frame writer stress test (never enable in production)"
+        default n
+        help
+            Two tasks each emit 1000 events while ESP_LOGW spams, three seconds
+            after boot. Check on the host with
+            tools/embpet_cli.py --check-frames SEC --reset.
+
+endmenu

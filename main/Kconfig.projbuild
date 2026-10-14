@@ -10,9 +10,18 @@ menu "embpet"
     config EMBPET_EVT_RING
         int "Event ring size (events kept for replay)"
         default 32
-        range 1 1024
+        range 1 128
         help
             Number of recent evt frames kept for replay, README 3.3.
+
+    config EMBPET_EVT_RING_BYTES
+        int "Event ring byte cap (bytes of stored frames)"
+        default 16384
+        range 256 65536
+        help
+            Upper bound on heap used by the replay ring. Oldest events are
+            evicted when the cap is reached; a single frame larger than the cap
+            is not stored (evt since then reports truncated).
 
     config EMBPET_PULSE_DEFAULT_MS
         int "Default output pulse length (ms)"

@@ -41,7 +41,7 @@ Example from the owner's side: actors **A** and **B** each send you a message. I
 | 2 | OUT2 | **Strapping pin**, must read high at reset or the chip may not boot. Wire its opto in the sink configuration (§1.3). |
 | 3 | OUT3 | |
 | 4–7 | OUT4–OUT7 | JTAG pins (MTMS/MTDI/MTCK/MTDO); free because JTAG runs over USB |
-| 8 | Status LED | Onboard blue LED, assumed **active-low** (to verify on the unit). **Strapping pin**, must be high at reset; leave nothing else on it. |
+| 8 | Status LED | Onboard blue LED, **active-low** (verified on the unit: GPIO8 high = dark, low = lit). **Strapping pin**, must be high at reset; leave nothing else on it. |
 | 9 | BOOT button | Strapping; reserved |
 | 10 | IN10 | |
 | 20 | IN20 | U0RXD. Sits next to the antenna, so wires here can detune Wi-Fi. |
@@ -137,7 +137,7 @@ GPIO 10, 20 and 21, wired through optos (§1.3). Active means the opto is energi
 
 ### 2.5 Configuration storage (NVS)
 
-Wi-Fi SSID and password, Wi-Fi TX power, bot token, owner `chat_id`, per-pin boot levels, and per-input debounce times. Secrets are never echoed back: `wifi status` shows the SSID only, and `tg status` shows a masked token (`123456:AA…xyz`). NVS encryption is a non-goal for now.
+Wi-Fi SSID and password, Wi-Fi TX power, bot token, owner `chat_id`, per-pin boot levels, and per-input debounce times. Secrets are never echoed back: `wifi status` shows the SSID only, and `tg status` shows a masked token (`123456:AA…xyz`). NVS encryption is a non-goal for now. The settings carry a schema version; if the stored version differs from the firmware's, including after a downgrade, the `embpet` NVS namespace is erased and all settings return to their defaults.
 
 ---
 
@@ -267,10 +267,11 @@ idf.py -p /dev/cu.usbmodem11101 flash monitor
 (delete `sdkconfig` and rebuild to pick up changes to the defaults). The firmware version
 is `git describe --always --tags --dirty`, so an untagged repo yields a bare commit hash.
 
-Warnings: all project components build with `-Wall -Wextra -Werror` plus
-`-Wunused-parameter -Wsign-compare` and errors for unused variables and functions. They are
-set by `embpet_component_warnings()` in `cmake/embpet_warnings.cmake`, and the host tests use
-the same set, so target and host builds agree.
+Warnings: all project components build with `-Wall -Wextra -Werror` plus `-Wsign-compare`
+and errors for unused variables and functions. They are set by `embpet_component_warnings()`
+in `cmake/embpet_warnings.cmake`, and the host tests use the same set. One difference: unused
+parameters are only flagged on the host, because IDF's own inline headers trip
+`-Wunused-parameter` on target.
 
 Provisioning is done through the CLI; see the `wifi-connect` skill in `skills/`.
 

@@ -79,3 +79,14 @@ embpet_add_host_test(
     SOURCES  pending/test_pending.c ${EMBPET_ROOT}/components/tgbot/pending_core.c
              ${EMBPET_ROOT}/components/tgbot/prefix_core.c
     INCLUDES ${EMBPET_ROOT}/components/tgbot/include)
+
+embpet_add_host_test(
+    NAME     cfg
+    SOURCES  cfg/test_cfg.c ${EMBPET_ROOT}/components/netcfg/cfg_core.c
+    INCLUDES ${EMBPET_ROOT}/components/netcfg/include)
+
+embpet_add_host_test(
+    NAME     proto
+    SOURCES  proto/test_proto.c ${EMBPET_ROOT}/components/proto/proto_core.c
+    INCLUDES ${EMBPET_ROOT}/components/proto/include
+    WITH_CJSON)

@@ -16,6 +16,15 @@ Passthrough mode (no command is sent):
 Prints the raw serial output for SEC seconds and exits 0. With --reset the chip
 is reset first (RTS pulse on USB-Serial-JTAG), so the 2nd-stage bootloader log
 and the app banner are captured. Use it where `idf.py monitor` has no TTY.
+
+Frame check (no command is sent):
+  embpet_cli.py [-p PORT] --check-frames SEC [--reset]
+
+Reads SEC seconds, parses every `@@` line as JSON and checks that seq is strictly
+increasing per boot id. A mid-line '@@' is bad only if the rest of the line parses as a
+frame (t and seq); other '@@' text is counted in embedded_text. Prints a JSON summary
+and up to 5 bad lines to stderr; exit 0 iff bad == 0, gaps == 0 and frames > 0.
+Offline test: scripts/idf.sh python tools/test_embpet_cli.py
 """
 import argparse
 import glob
@@ -59,6 +68,14 @@ def open_port(port):
     return s
 
 
+def _reset(s):
+    """Reset the chip: same as esptool's HardReset(uses_usb=True), RTS high holds EN low."""
+    s.rts = True
+    time.sleep(0.2)
+    s.rts = False
+    time.sleep(0.2)
+
+
 def monitor(port, seconds, reset):
     try:
         s = open_port(port or find_port())
@@ -68,11 +85,7 @@ def monitor(port, seconds, reset):
     try:
         with s:
             if reset:
-                # Same as esptool's HardReset(uses_usb=True): RTS high holds EN low.
-                s.rts = True
-                time.sleep(0.2)
-                s.rts = False
-                time.sleep(0.2)
+                _reset(s)
             deadline = time.monotonic() + seconds
             while time.monotonic() < deadline:
                 data = s.read(4096)
@@ -87,6 +100,104 @@ def monitor(port, seconds, reset):
     return 0
 
 
+def _frame_obj(s):
+    """Parse s as a JSON object holding t and seq, else None."""
+    try:
+        f = json.loads(s)
+    except ValueError:
+        return None
+    if isinstance(f, dict) and "t" in f and "seq" in f:
+        return f
+    return None
+
+
+class FrameChecker:
+    """Line-by-line checker for --check-frames.
+
+    A line starting with '@@' must be a frame (JSON object with int seq and a boot id).
+    An '@@' later in a line is bad only if the rest parses as a frame (a real frame glued
+    onto another line); otherwise it is log text and only counted in embedded_text.
+    seq must be strictly increasing per boot id; any gap is counted and fails the check.
+    Meant for plain streams: an `evt since` replay re-emits old seqs and would be
+    reported as bad.
+    """
+
+    def __init__(self):
+        self.frames = self.bad = self.gaps = self.embedded_text = 0
+        self.problems = []
+        self.last = {}          # boot id -> last seq
+
+    def _bad(self, msg, text):
+        self.bad += 1
+        self.problems.append("%s: %r" % (msg, text[:120]))
+
+    def feed(self, text):
+        if "@@" not in text:
+            return
+        if not text.startswith("@@"):
+            idx = text.find("@@")
+            while idx >= 0:
+                if _frame_obj(text[idx + 2:]) is not None:
+                    self._bad("frame glued onto another line", text)
+                    return
+                idx = text.find("@@", idx + 2)
+            self.embedded_text += 1
+            return
+        f = _frame_obj(text[2:])
+        if f is None or type(f["seq"]) is not int or "boot" not in f:
+            self._bad("bad frame", text)
+            return
+        self.frames += 1
+        seq, boot = f["seq"], f["boot"]
+        prev = self.last.get(boot)
+        if prev is not None:
+            if seq <= prev:
+                self._bad("seq %d after %d (boot %s)" % (seq, prev, boot), text)
+            elif seq > prev + 1:
+                self.gaps += 1
+        self.last[boot] = seq if prev is None else max(seq, prev)
+
+    def ok(self):
+        return self.bad == 0 and self.gaps == 0 and self.frames > 0
+
+    def summary(self):
+        return {"frames": self.frames, "bad": self.bad, "gaps": self.gaps,
+                "embedded_text": self.embedded_text, "boots": len(self.last),
+                "last_seq": self.last}
+
+
+def check_frames(port, seconds, reset):
+    """Read SEC seconds and run every line through FrameChecker.
+    Exit 0 = ok, 1 = bad frames / gaps / no frames, 2 = serial error."""
+    try:
+        s = open_port(port or find_port())
+    except serial.SerialException as e:
+        print("serial error: %s" % e, file=sys.stderr)
+        return 2
+    chk = FrameChecker()
+    try:
+        with s:
+            if reset:
+                _reset(s)
+            deadline = time.monotonic() + seconds
+            buf = b""
+            while time.monotonic() < deadline:
+                buf += s.read(4096)
+                while b"\n" in buf:
+                    raw, buf = buf.split(b"\n", 1)
+                    text = raw.decode("utf-8", "replace").rstrip("\r")
+                    chk.feed(text)
+    except serial.SerialException as e:
+        print("serial error: %s" % e, file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        pass
+    for p in chk.problems[:5]:
+        print(p, file=sys.stderr)
+    print(json.dumps(chk.summary()))
+    return 0 if chk.ok() else 1
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-p", "--port")
@@ -98,13 +209,22 @@ def main():
                     help="print every console line to stderr")
     ap.add_argument("--monitor", type=float, metavar="SEC",
                     help="print raw serial output for SEC seconds, then exit")
+    ap.add_argument("--check-frames", type=float, metavar="SEC",
+                    help="read SEC seconds and verify every @@ line is JSON with strictly "
+                         "increasing seq; exit 0 (ok) / 1 (bad) / 2 (serial error)")
     ap.add_argument("--reset", action="store_true",
-                    help="with --monitor: reset the chip first")
+                    help="with --monitor or --check-frames: reset the chip first")
     ap.add_argument("cmd", nargs="*", help="command words, then arguments")
     a = ap.parse_args()
 
-    if a.reset and a.monitor is None:
-        ap.error("--reset requires --monitor")
+    if a.reset and a.monitor is None and a.check_frames is None:
+        ap.error("--reset requires --monitor or --check-frames")
+    if a.check_frames is not None:
+        if a.cmd or a.monitor is not None:
+            ap.error("--check-frames cannot be combined with a command or --monitor")
+        if a.check_frames <= 0:
+            ap.error("--check-frames SEC must be greater than 0")
+        return check_frames(a.port, a.check_frames, a.reset)
     if a.monitor is not None:
         if a.cmd:
             ap.error("--monitor cannot be combined with a command")

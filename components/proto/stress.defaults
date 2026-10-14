@@ -1,0 +1,3 @@
+# Extra sdkconfig defaults for the frame-writer stress build (embpet-kzd):
+#   -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;components/proto/stress.defaults"
+CONFIG_EMBPET_PROTO_STRESS=y
