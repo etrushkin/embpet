@@ -4,3 +4,18 @@
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# Local secrets (Wi-Fi, Telegram token)
+.env.local
+
+# ESP-IDF build output
+build/
+sdkconfig.old
+managed_components/
+
+# Agent/tool state (local only)
+.omc/
+.agents/
+.codex/
+.claude/
+.beads/

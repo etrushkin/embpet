@@ -2,6 +2,52 @@
 
 This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
 
+## Project: embpet
+
+ESP32-C3 USB Telegram bridge with GPIO. ESP-IDF v5.5.2, plain C.
+
+- **Spec:** `README.md`
+- **Architecture and verification strategy:** `docs/PLAN.md`
+- **Work items:** beads; the entry point is `docs/PLAN.md` §3.
+
+### Build & Test
+
+```bash
+. scripts/export.sh                           # activate ESP-IDF (self-contained root ~/code/esp-idf_5.5.2)
+idf.py build
+idf.py -p /dev/cu.usbmodem11101 flash         # board port; check `ls /dev/cu.usbmodem*`
+scripts/test_host.sh                          # host unit tests (once created)
+python tools/embpet_cli.py sys info           # one CLI command over serial
+```
+
+Never install ESP-IDF into `~/.espressif` or `~/esp`. A new version gets its own root via `scripts/bootstrap.sh <root> -v <tag>`.
+
+### Project workflow
+
+1. **Pick work:** run `bd ready` and choose a task, not an epic. Prefer tasks labelled `critical-path`. Claim it with `bd update <id> --claim`. Don't start beads labelled `backlog`.
+2. **Brief:** `bd show <id>` (Context / Scope / Acceptance Criteria / Refs, plus risk notes) and the README sections it cites. Stay in scope. If the spec is wrong or incomplete, ask the user instead of inventing behaviour, and record the outcome with `bd update <id> --append-notes`.
+3. **Verify, then close:** check every acceptance criterion and record the evidence (command output, measurements) in the bead notes. A separate verifier or reviewer pass approves the work; never self-approve. Close with `bd close <id> --suggest-next`. File new work with `--deps discovered-from:<id>`.
+4. **Definition of done:**
+   - `idf.py build` is clean, and project components compile with `-Werror -Wall -Wextra`.
+   - Host tests are green.
+   - README and skills are updated when a command, event or behaviour changed.
+   - No TODOs, stubs, `#if 0`, skipped tests or placeholder handlers remain.
+5. **Hardware (label `hw`):** only **one** agent at a time may use `/dev/cu.usbmodem*`; flash, monitor and HIL all count. Wrap hardware commands in `flock /tmp/embpet-hw.lock …`. Close `idf.py monitor` before using `tools/embpet_cli.py` or pytest. Open the port with DTR=RTS=False; the tools already do this.
+6. **Agent routing:**
+
+   | Work | Agent |
+   |---|---|
+   | Most implementation | `executor` (sonnet) |
+   | Beads labelled `model-opus` | `executor` with `model=opus` |
+   | Test-heavy work | `test-engineer` |
+   | End of an epic | `verifier` |
+   | Before proposing a commit | `code-reviewer` |
+   | Docs | `writer` |
+   | ESP-IDF API questions | Read `$IDF_PATH` sources first, then `document-specialist` |
+7. **Human items** (label `human`, `bd human list`): ask the user early so they don't block the critical path.
+8. **Git:** no commits or pushes without explicit user approval. At the end of an epic, propose the files and a commit message, then wait.
+9. **Secrets:** `WIFI_SSID`, `WIFI_PASS` and `TG_TOKEN` exist only in the git-ignored `.env.local`. Load them with `set -a; . ./.env.local; set +a`. Never print them or copy them into code, skills, beads, logs or commits.
+
 > **Architecture in one line:** Issues live in a local Dolt database
 > (`.beads/dolt/`); cross-machine sync uses `bd dolt push/pull` (a
 > git-compatible protocol), stored under `refs/dolt/data` on your git
