@@ -289,6 +289,7 @@ The harness is a standalone CMake project in `test/host/` using Unity and cJSON 
 `$IDF_PATH/components`. To add a test, create `test/host/<name>/test_<name>.c` (Unity, own
 `main()`) and register it in `test/host/CMakeLists.txt` with `embpet_add_host_test(NAME ...
 SOURCES ... INCLUDES ... [WITH_CJSON])`. Host tests are built with `-Wall -Wextra -Werror`.
+They default to a Debug build with AddressSanitizer and UBSan (`-fsanitize=address,undefined`, UB is fatal); LeakSanitizer is unavailable on macOS ARM.
 
 ---
 

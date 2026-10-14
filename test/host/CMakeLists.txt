@@ -25,6 +25,10 @@ foreach(_f "${UNITY_DIR}/unity.c" "${CJSON_DIR}/cJSON.c")
     endif()
 endforeach()
 
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type (default Debug for host tests)" FORCE)
+endif()
+
 project(embpet_host_tests C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -37,8 +41,15 @@ enable_testing()
 # Single source of truth for the warning set (defines EMBPET_WARNING_FLAGS; no IDF commands run).
 include(${EMBPET_ROOT}/cmake/embpet_warnings.cmake)
 
+# ASan + UBSan on every target (compile and link). UB aborts the test instead of printing and
+# continuing. LeakSanitizer is unsupported on macOS ARM; ASan simply omits leak checking there.
+set(EMBPET_SANITIZE_FLAGS -fsanitize=address,undefined -fno-sanitize-recover=undefined
+                          -fno-omit-frame-pointer)
+
 # Third-party code is built without -Werror; project code and tests with it.
 add_library(unity STATIC "${UNITY_DIR}/unity.c")
+target_compile_options(unity PUBLIC ${EMBPET_SANITIZE_FLAGS})
+target_link_options(unity PUBLIC ${EMBPET_SANITIZE_FLAGS})
 target_include_directories(unity SYSTEM PUBLIC "${UNITY_DIR}")
 target_compile_definitions(unity PUBLIC UNITY_INCLUDE_DOUBLE)   # cJSON numbers are double
 target_compile_options(unity PRIVATE -w)
@@ -46,6 +57,8 @@ target_compile_options(unity PRIVATE -w)
 add_library(cjson STATIC "${CJSON_DIR}/cJSON.c")
 target_include_directories(cjson SYSTEM PUBLIC "${CJSON_DIR}")
 target_compile_options(cjson PRIVATE -w)
+target_compile_options(cjson PUBLIC ${EMBPET_SANITIZE_FLAGS})
+target_link_options(cjson PUBLIC ${EMBPET_SANITIZE_FLAGS})
 
 function(embpet_add_host_test)
     cmake_parse_arguments(T "WITH_CJSON" "NAME" "SOURCES;INCLUDES" ${ARGN})
@@ -58,7 +71,8 @@ function(embpet_add_host_test)
     if(T_WITH_CJSON)
         target_link_libraries(${T_NAME} PRIVATE cjson)
     endif()
-    target_compile_options(${T_NAME} PRIVATE ${EMBPET_WARNING_FLAGS})
+    target_compile_options(${T_NAME} PRIVATE ${EMBPET_WARNING_FLAGS} ${EMBPET_SANITIZE_FLAGS})
+    target_link_options(${T_NAME} PRIVATE ${EMBPET_SANITIZE_FLAGS})
     add_test(NAME ${T_NAME} COMMAND ${T_NAME})
 endfunction()
 
