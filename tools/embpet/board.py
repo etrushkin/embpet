@@ -8,6 +8,7 @@ from .frames import build_line, parse_frame
 from .serialport import find_port, open_port, reset_chip
 
 EVENT_BACKLOG = 1000
+SESSION_START = b"\x15\n"
 
 
 class CmdTimeout(TimeoutError):
@@ -30,7 +31,7 @@ class Board:
     optional on_line(text) / on_event(frame) callbacks see every console line / evt frame
     as it arrives."""
 
-    def __init__(self, port=None, serial_cls=None, reset=False):
+    def __init__(self, port=None, serial_cls=None, reset=False, session_start=True):
         port = port or find_port()
         if not port:
             raise NoBoard("no board found (/dev/cu.usbmodem*); pass a port")
@@ -40,13 +41,23 @@ class Board:
         self._events = collections.deque(maxlen=EVENT_BACKLOG)
         self._buf = b""
         self._serial_cls = serial_cls
+        self._session_start = session_start
         self._s = open_port(port, serial_cls=serial_cls)
         try:
             if reset:
-                reset_chip(self._s)
+                reset_chip(self._s)     # a reset clears the line, and the bytes would race boot
+            elif session_start:
+                self._start_session()
         except BaseException:
             self._s.close()
             raise
+
+    def _start_session(self):
+        """Ctrl-U then newline (README 3.2): discards a partial line a previous session left
+        in the firmware's line buffer or USB ring; the newline ends the now empty line, which
+        gets no response."""
+        self._s.write(SESSION_START)
+        self._s.flush()
 
     def close(self):
         self._s.close()
@@ -72,6 +83,8 @@ class Board:
                 time.sleep(0.5)
         self._buf = b""
         self._events.clear()
+        if self._session_start:
+            self._start_session()
 
     def __enter__(self):
         return self

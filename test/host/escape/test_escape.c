@@ -285,6 +285,44 @@ static void test_line_tab_end_to_end(void)
     TEST_ASSERT_EQUAL_STRING("c\td", s_argv[2]);
 }
 
+/* Ctrl-U discards the line wherever it arrives; the next line starts clean. */
+static void test_line_kill(void)
+{
+    esc_line_init(&s_l, s_buf, sizeof(s_buf));
+    TEST_ASSERT_EQUAL(ESC_LINE_KILLED, esc_line_feed(&s_l, 0x15));    /* at line start */
+    TEST_ASSERT_EQUAL_UINT(0, s_l.len);
+    TEST_ASSERT_EQUAL(1, feed("tg send\x15sys info\n", 17));         /* plain */
+    TEST_ASSERT_EQUAL_STRING("sys info", s_last);
+    TEST_ASSERT_EQUAL(1, feed("a \"b c\x15ok\n", 10));               /* inside quotes */
+    TEST_ASSERT_EQUAL_STRING("ok", s_last);
+    TEST_ASSERT_EQUAL(ESC_OK, split(s_last));
+    TEST_ASSERT_EQUAL_UINT(1, s_argc);
+    TEST_ASSERT_EQUAL(1, feed("\"a\\\x15x\n", 6));                   /* after a backslash escape */
+    TEST_ASSERT_EQUAL_STRING("x", s_last);
+    TEST_ASSERT_EQUAL(ESC_OK, split(s_last));
+    TEST_ASSERT_EQUAL(1, feed("ab\x15\x15\x15z\n", 7));              /* repeated */
+    TEST_ASSERT_EQUAL_STRING("z", s_last);
+    TEST_ASSERT_EQUAL(1, feed("ab\x15\n", 4));                       /* kill, then empty line */
+    TEST_ASSERT_EQUAL_STRING("", s_last);
+}
+
+/* Ctrl-U also clears a line that overflowed, and a pending CR does not survive it. */
+static void test_line_kill_overflow_and_cr(void)
+{
+    esc_line_init(&s_l, s_buf, sizeof(s_buf));
+    for (int i = 0; i < 20; i++) {
+        esc_line_feed(&s_l, 'x');
+    }
+    TEST_ASSERT_TRUE(s_l.overflow);
+    TEST_ASSERT_EQUAL(ESC_LINE_KILLED, esc_line_feed(&s_l, 0x15));
+    TEST_ASSERT_FALSE(s_l.overflow);
+    TEST_ASSERT_EQUAL(1, feed("ok\n", 3));
+    TEST_ASSERT_EQUAL_STRING("ok", s_last);
+    TEST_ASSERT_EQUAL(1, feed("a\r", 2));
+    TEST_ASSERT_EQUAL(ESC_LINE_KILLED, esc_line_feed(&s_l, 0x15));
+    TEST_ASSERT_EQUAL(ESC_LINE_DONE, esc_line_feed(&s_l, '\n'));      /* not swallowed as CRLF */
+}
+
 static void test_line_overflow(void)
 {
     esc_line_init(&s_l, s_buf, sizeof(s_buf));     /* holds 15 bytes */
@@ -322,6 +360,8 @@ int main(void)
     RUN_TEST(test_line_crlf_swallow_once);
     RUN_TEST(test_line_controls_and_utf8);
     RUN_TEST(test_line_erase_bounded);
+    RUN_TEST(test_line_kill);
+    RUN_TEST(test_line_kill_overflow_and_cr);
     RUN_TEST(test_line_tab_end_to_end);
     RUN_TEST(test_line_overflow);
     return UNITY_END();

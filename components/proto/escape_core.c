@@ -31,6 +31,10 @@ esc_line_ev_t esc_line_feed(esc_line_t *l, uint8_t c)
         return ESC_LINE_DONE;
     }
     l->prev_cr = false;
+    if (c == 0x15) {                    /* Ctrl-U: kill the line, overflow included */
+        esc_line_reset(l);
+        return ESC_LINE_KILLED;
+    }
     if (c == 0x08 || c == 0x7f) {       /* BS or DEL: erase one character */
         if (l->len == 0 || l->overflow) {
             return ESC_LINE_IGNORED;

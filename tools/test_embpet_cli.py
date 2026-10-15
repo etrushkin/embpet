@@ -10,6 +10,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from embpet import (Board, CmdTimeout, FrameChecker, build_line, open_port,  # noqa: E402
                     parse_frame, quote, split_command)
+from embpet.board import SESSION_START  # noqa: E402
 from serial.serialutil import SerialBase  # noqa: E402
 
 
@@ -170,8 +171,12 @@ class FakeBoardSerial(FakePosixSerial):
         super().open()
         self.written = []
         self.pending = []
+        self.session_starts = 0
 
     def write(self, data):
+        if data == SESSION_START:       # not a command: the board answers nothing
+            self.session_starts += 1
+            return len(data)
         line = data.decode().rstrip("\n")
         self.written.append(line)
         self.pending += [(x + "\n").encode() for x in type(self).replies(line)]
@@ -240,6 +245,23 @@ class BoardCmdTest(unittest.TestCase):
         b.on_event = seen.append
         b.cmd("sys info")
         self.assertEqual([e["seq"] for e in seen], [3])
+
+    def test_session_start_is_ctrl_u_newline_sent_once_on_open(self):
+        self.assertEqual(SESSION_START, b"\x15\n")
+        b = make_board(lambda ln: [])
+        self.assertEqual((b._s.session_starts, b._s.written), (1, []))
+
+    def test_passive_board_sends_nothing(self):
+        cls = type("S", (FakeBoardSerial,), {})
+        b = Board("/dev/null", serial_cls=cls, session_start=False)
+        self.assertEqual((b._s.session_starts, b._s.written), (0, []))
+
+    def test_reset_open_sends_no_session_start(self):
+        from unittest import mock
+        cls = type("S", (FakeBoardSerial,), {})
+        with mock.patch("embpet.board.time.sleep"):
+            b = Board("/dev/null", serial_cls=cls, reset=True)
+        self.assertEqual((b._s.session_starts, b._s.written), (0, []))
 
     def test_board_does_not_present_reset_state_on_open(self):
         b = make_board(lambda ln: [])
@@ -332,6 +354,7 @@ class BoardReconnectTest(unittest.TestCase):
         self.assertTrue(b._s.is_open)
         self.assertEqual(b._buf, b"")
         self.assertEqual(list(b.events(0)), [])
+        self.assertEqual(b._s.session_starts, 1)        # the new session starts with Ctrl-U
 
     def test_raises_noboard_when_the_port_never_comes_back(self):
         from unittest import mock

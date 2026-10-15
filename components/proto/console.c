@@ -542,6 +542,15 @@ static void repl_task(void *arg)
                 memcpy(&echo[ne], "\b \b", 3);
                 ne += 3;
                 break;
+            case ESC_LINE_KILLED:
+                /* Echo "^U", end the line and prompt again; a long echo run before it
+                 * goes out first. The discarded text may have been a secret. */
+                console_out(echo, ne);
+                ne = 0;
+                console_out("^U\n" PROMPT, 3 + strlen(PROMPT));
+                mbedtls_platform_zeroize(s_line, sizeof(s_line));
+                wipe = true;
+                break;
             case ESC_LINE_DONE:
                 echo[ne++] = '\n';
                 console_out(echo, ne);

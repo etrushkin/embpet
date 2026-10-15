@@ -3,6 +3,7 @@
 
   scripts/hw.sh python tools/console_test.py [-p PORT] [--flash BUILD_DIR] functional
   scripts/hw.sh python tools/console_test.py [-p PORT] [--flash BUILD_DIR] soak --closed SEC
+  scripts/hw.sh python tools/console_test.py [-p PORT] linekill
   scripts/hw.sh python tools/console_test.py [-p PORT] reopen [-n N]
 
 --flash writes BUILD_DIR/flash_args with esptool first, so flash and test run under one
@@ -22,6 +23,10 @@ soak: needs the soak firmware (CONFIG_EMBPET_CONSOLE_SOAK: a soak event and a WA
   `evt since <last seq>` replays the newest events with truncated:true, and the replayed
   soak events show that event writes, log writes and the generator's 100 ms loop never
   stalled.
+
+linekill (embpet-s2j.6): write a partial `sys log debug` (and one with an open quote) without
+  newline, close and reopen, send Ctrl-U + newline, then `sys info`: log level unchanged,
+  answered, no res for the leftover; a control without Ctrl-U shows the leftover does run.
 
 reopen (embpet-s2j.1): N separate embpet_cli.py runs keep the boot id and a rising
   uptime (opening the port does not reset the chip); `embpet_cli.py --monitor 1 --reset`
@@ -355,6 +360,45 @@ def reopen(port, n):
                                              f.get("reset_reason")]}
 
 
+def linekill(port):
+    """embpet-s2j.6: a partial line left by a closed session is discarded by Ctrl-U. Two
+    rounds, each: write the partial line without a newline, close, reopen, send Ctrl-U +
+    newline, then `sys info`. The log level must be unchanged, sys info answered once, and no
+    res may appear for the leftover. Round 2 leaves an open quote."""
+    c = Checks()
+    b = Board(port, settle=1.0)
+    b.send("\x15\n")
+    f, _ = b.cmd("sys log -i k0 warn", "k0")
+    c.check("start at log level warn", f and f.get("ok") and f.get("level") == "warn", f)
+    for n, partial in enumerate(("sys log debug", "sys log -i kq \"debug")):
+        b.send(partial)                             # no newline
+        b.pump(0.3)
+        b.close()
+        time.sleep(0.5)
+        b = Board(port, settle=0.5)
+        b.send("\x15\n")
+        rid = "k%d" % (n + 1)
+        f, frames = b.cmd("sys info -i %s" % rid, rid)
+        c.check("round %d: sys info answered" % (n + 1), f and f.get("ok") is True, f)
+        c.check("round %d: log level unchanged" % (n + 1), f and f.get("log") == "warn", f)
+        b.pump(0.5)
+        stray = [x for x in b.frames if x.get("t") == "res" and x.get("rid") != rid]
+        c.check("round %d: no res for the leftover" % (n + 1), not stray, stray[:2])
+    # control: without Ctrl-U the leftover joins the next line and does run
+    b.send("sys log debug")
+    b.pump(0.3)
+    b.close()
+    time.sleep(0.5)
+    b = Board(port, settle=0.5)
+    f, _ = b.cmd(" -i k9", "k9")
+    c.check("control: without Ctrl-U the leftover runs", f and f.get("level") == "debug", f)
+    b.send("\x15\n")
+    f, _ = b.cmd("sys log -i k10 warn", "k10")
+    c.check("level restored to warn", f and f.get("ok") and f.get("level") == "warn", f)
+    b.close()
+    return c, {}
+
+
 def pipeline(port, sleep_ms, lines, length):
     """embpet-s2j.3: while one command blocks for SLEEP_MS, the host pipelines LINES
     `probe echo` commands of LENGTH text bytes each (written by a second thread, so the main
@@ -425,6 +469,7 @@ def main():
     ap.add_argument("--flash", metavar="BUILD_DIR")
     sub = ap.add_subparsers(dest="mode", required=True)
     sub.add_parser("functional")
+    sub.add_parser("linekill")
     sp = sub.add_parser("soak")
     sp.add_argument("--closed", type=float, default=120.0, metavar="SEC")
     rp = sub.add_parser("reopen")
@@ -440,6 +485,8 @@ def main():
             flash(port, a.flash)
         if a.mode == "functional":
             c, info = functional(port), {}
+        elif a.mode == "linekill":
+            c, info = linekill(port)
         elif a.mode == "reopen":
             c, info = reopen(port, a.n)
         elif a.mode == "pipeline":

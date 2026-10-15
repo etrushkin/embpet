@@ -66,7 +66,7 @@ def _serial_error(e):
 
 def monitor(port, seconds, reset):
     try:
-        board = Board(port, reset=reset)
+        board = Board(port, reset=reset, session_start=False)
     except (serial.SerialException, NoBoard) as e:
         return _serial_error(e)
     try:
@@ -88,10 +88,10 @@ def check_frames(port, seconds, reset):
     """Read SEC seconds and run every line through FrameChecker.
     Exit 0 = ok, 1 = bad frames / gaps / no frames, 2 = serial error."""
     try:
-        board = Board(port, reset=reset)
+        board = Board(port, reset=reset, session_start=False)
     except (serial.SerialException, NoBoard) as e:
         return _serial_error(e)
-    chk = FrameChecker()
+    chk =FrameChecker()
     try:
         with board:
             for text in board.lines(seconds):
@@ -109,7 +109,7 @@ def check_frames(port, seconds, reset):
 def listen(port, seconds, reset):
     """Print every evt frame as a JSON line. SECONDS == 0 runs until Ctrl-C."""
     try:
-        board = Board(port, reset=reset)
+        board = Board(port, reset=reset, session_start=False)
     except (serial.SerialException, NoBoard) as e:
         return _serial_error(e)
     try:

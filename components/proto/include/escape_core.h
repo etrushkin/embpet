@@ -31,6 +31,9 @@ typedef enum {
     ESC_LINE_STORED,        /* byte appended: echo it */
     ESC_LINE_ERASED,        /* one character (a UTF-8 sequence: the lead byte and at most
                                3 continuation bytes) removed: echo "\b \b" */
+    ESC_LINE_KILLED,        /* Ctrl-U (0x15): the whole line, partial or not, is discarded
+                               (the line holds no quote or escape state, that is only
+                               looked at by esc_split) and the buffer is already reset */
     ESC_LINE_DONE,          /* CR or LF: buf is NUL-terminated, len bytes; call
                                esc_line_reset() before feeding the next line */
 } esc_line_ev_t;
