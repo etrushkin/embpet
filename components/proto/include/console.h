@@ -1,7 +1,10 @@
 /* Serial console (README 3.1-3.3): REPL task on USB-Serial-JTAG, command table with the
  * common -a <actor> / -i <rid> options, exactly one res per command, console log sink.
  *
- * Input path: the REPL reads the USB-Serial-JTAG driver directly, assembles lines with
+ * Input path: the REPL reads the USB-Serial-JTAG driver directly (flow-controlled: input
+ * that does not fit into the RX ring waits on the host, see rx_gate in console.c; never
+ * select() on the console fd: VFS select takes over the driver's one notify hook that the
+ * flow control uses), assembles lines with
  * escape_core (echo, backspace, CR/LF/CRLF), splits them with esc_split (decodes \n \" \\
  * inside quotes, UTF-8 untouched) and dispatches here. esp_console's REPL/linenoise and
  * esp_console_run are not used because, in IDF 5.5.2, linenoise strips non-isprint bytes

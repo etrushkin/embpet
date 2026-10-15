@@ -2,17 +2,19 @@
  *
  * Why a frame cannot be split by ESP_LOG output (ESP-IDF v5.5.2, this build uses
  * CONFIG_LOG_VERSION_1):
- *  - With log version 1 each log line is ONE vprintf() call on stdout (the default sink);
- *    newlib's vfprintf holds the stdout FILE lock for that whole call. (Log version 2
- *    instead brackets the line with flockfile(stdout)/funlockfile(stdout).)
- *  - fwrite() takes the same recursive FILE lock for the entire call, including the
- *    chunked unbuffered write down to the VFS. So one fwrite of the complete
- *    "\n@@{json}\n" line is atomic against log lines in both directions.
- *  - The USB-Serial-JTAG VFS write has its own write_lock per call.
+ *  - Each frame goes out through console_out() (console.c), which holds flockfile(stdout),
+ *    the recursive stdout FILE lock, for the whole "\n@@{json}\n" line (embpet-s2j.4: in
+ *    whole driver writes, not through the per-byte VFS).
+ *  - The console log sink formats each log line and writes it with console_out() while
+ *    holding the same lock. Any other stdio call on stdout (and the default vprintf sink,
+ *    or log version 2's flockfile bracket) takes it too. So a frame is atomic against log
+ *    lines in both directions.
  * Not covered (and not used by this firmware): esp_rom_printf, panic output and logging
- * from constrained contexts (ISR / scheduler off), which bypass the stdout lock.
+ * from constrained contexts (ISR / scheduler off), which bypass the stdout lock; and stderr,
+ * which has its own FILE lock: a stderr write can land between the 512-byte chunks of a
+ * longer frame (each chunk is one atomic driver write).
  * Our own mutex serialises seq assignment, ring insertion and write order, so frames on
- * the wire are in strictly increasing seq order.
+ * the wire are in strictly increasing seq order. Lock order: s_lock, then stdout.
  *
  * Rules for a custom log sink (esp_log_set_vprintf, embpet-86h):
  *  - it must write each log line with ONE stdio call on stdout (or hold flockfile(stdout)
@@ -26,7 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "driver/usb_serial_jtag.h"
+#include "console_priv.h"
 #include "esp_app_desc.h"
 #include "esp_idf_version.h"
 #include "esp_random.h"
@@ -44,15 +46,13 @@ static char s_boot[9];
 static uint32_t s_seq;
 static proto_ring_t s_ring;
 
-/* Caller holds s_lock. Blocks at most the VFS's TX timeout (about 50 ms once per host
- * stall; later bytes are then dropped immediately). A short write is ignored on
- * purpose: the frame stays in the ring and the host recovers with `evt since`. */
+/* Caller holds s_lock. Blocks at most the 50 ms TX timeout once per host stall; later
+ * output is then dropped immediately, and nothing is written while the cable is out
+ * (console_out). A lost frame is ignored on purpose: an event stays in the ring and the
+ * host recovers with `evt since`. */
 static void write_line(const char *line, size_t len)
 {
-    if (usb_serial_jtag_is_connected()) {
-        (void)fwrite(line, 1, len, stdout);
-        (void)fflush(stdout);
-    }
+    (void)console_out(line, len);
 }
 
 void proto_init(void)

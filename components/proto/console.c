@@ -1,23 +1,33 @@
 /* Serial console: REPL task, command table with -a/-i, response-once, log sink.
  * See console.h for why esp_console's REPL is not used.
  *
- * Log sink (README 3.1, "never block when no host reads"). Measured/derived facts for
- * IDF 5.5.2 with the USB-Serial-JTAG driver installed (usb_serial_jtag_vfs.c):
- *  - VFS write returns -1 at once while usb_serial_jtag_is_connected() is false (no USB
- *    SOF for ~3 ms: cable out, host asleep). An enumerated port that no program has open
- *    still counts as connected.
- *  - Otherwise each byte goes to the driver's TX ring; when the ring is full the first
- *    byte waits up to 50 ms, then every later byte is dropped at once until a write
- *    succeeds again. So stdout never blocks indefinitely, but a stalled host costs one
- *    50 ms wait per stall and bytes are lost mid-line.
- * The sink below drops whole log lines while the cable is unplugged or the TX ring is full
- * (the host stopped reading) and counts them (sys info log_dropped), so once a stall is
- * established logging costs nothing. The line that fills the ring can still pay the one
- * 50 ms wait (measured with the soak build: max ESP_LOGW 49 ms, max proto_evt 51 ms over a
- * 10 min closed port, once per close). Frames (proto.c) go through stdout unchanged; events
- * stay in the ring for evt since.
- * Rules from proto.c are kept: each log line is ONE stdio call (vprintf) on stdout, and
- * the sink never calls proto_*, so logging while holding proto's lock cannot deadlock. */
+ * Output path (embpet-s2j.4). With the driver installed, the IDF VFS (usb_serial_jtag_vfs.c,
+ * IDF 5.5.2) writes stdout one byte per usb_serial_jtag_write_bytes() call, about 10 us per
+ * byte. So frames, log lines, echo, prompt and help text bypass it: console_out() converts
+ * LF to CRLF itself (the VFS does that for CONFIG_LIBC_STDOUT_LINE_ENDING_CRLF) into a
+ * staging buffer and hands the driver whole chunks, under flockfile(stdout). It keeps the
+ * VFS's other semantics:
+ *  - nothing is written while usb_serial_jtag_is_connected() is false (no USB SOF for
+ *    ~3 ms: cable out, host asleep; the VFS write returns -1 then). An enumerated port that
+ *    no program has open still counts as connected.
+ *  - a chunk that does not fit in the TX ring waits up to 50 ms (TX_FLUSH_TIMEOUT_US) once;
+ *    if that times out, later chunks are dropped at once until one fits again. So output
+ *    never blocks indefinitely and a stalled host costs one 50 ms wait per stall. A driver
+ *    write is all or nothing, so a dropped chunk is whole (the VFS dropped single bytes),
+ *    and the first dropped chunk ends that console_out() call: the rest of a longer line is
+ *    not sent either. A frame cut by a stall is truncated, never spliced; it lacks its end,
+ *    so hosts see an unparsable line.
+ * Text that another stdio caller left in stdout's buffer is flushed first, under the lock.
+ * Log sink (README 3.1, "never block when no host reads"): it drops whole log lines while
+ * the cable is unplugged or the TX ring is full, or when console_out() could not write the
+ * line (the host stopped reading), and counts them (sys info log_dropped), so once a stall
+ * is established logging costs next to nothing. The write that finds the ring full can
+ * still pay the one 50 ms wait (soak build, port closed 60 s and 120 s: max proto_evt
+ * 50.0 ms, max ESP_LOGW 49 ms, once per close). Frames (proto.c) are written normally;
+ * events stay in the ring for evt since.
+ * Rules from proto.c are kept: each log line and each frame is written whole while holding
+ * flockfile(stdout), the lock every stdio call on stdout takes, and the sink never calls
+ * proto_*, so logging while holding proto's lock cannot deadlock. */
 #include "console.h"
 
 #include <stdarg.h>
@@ -27,20 +37,33 @@
 #include <string.h>
 
 #include "argtable3/argtable3.h"
+#include "console_priv.h"
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_select.h"
 #include "driver/usb_serial_jtag_vfs.h"
 #include "escape_core.h"
 #include "esp_freertos_hooks.h"
+#include "esp_idf_version.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "hal/usb_serial_jtag_ll.h"
 #include "mbedtls/platform_util.h"
 #include "proto.h"
 #include "sdkconfig.h"
 
-#ifdef CONFIG_EMBPET_CONSOLE_SOAK
-#include "console_priv.h"
+/* Written against the IDF 5.5 USB-Serial-JTAG driver; on an upgrade re-check: the ISR calls
+ * the select-notify hook (rx_gate) right after queueing each RX packet
+ * (usb_serial_jtag.c:144-154 in 5.5.2), the hook has one slot that VFS select() takes over
+ * (usb_serial_jtag_vfs.c:421/453), the per-byte VFS write path (console_out), and the LL
+ * int_ena helpers (usb_serial_jtag_ll_{ena,disable}_intr_mask, _get_intr_ena_status). */
+#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 5, 0) || \
+    ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 6, 0)
+#error "console.c relies on IDF 5.5.x USB-Serial-JTAG driver internals; re-check them (see above)"
+#endif
+
+#ifndef CONFIG_LIBC_STDOUT_LINE_ENDING_CRLF
+#error "console_out() sends LF as CRLF like the VFS does with LIBC_STDOUT_LINE_ENDING_CRLF"
 #endif
 
 static const char *TAG = "console";
@@ -53,8 +76,17 @@ static const char *TAG = "console";
 #define RX_CHUNK       64
 #define USJ_TX_RING    2048
 #define USJ_RX_RING    (CONFIG_EMBPET_CMDLINE_MAX + 256)   /* one full line fits */
+#define USJ_PKT        64           /* USB packet / RX FIFO size */
+/* Stop taking packets when less is free (rx_gate). The free estimate (ring size minus bytes
+ * waiting) can be up to one packet high while read_bytes is copying a chunk it has not yet
+ * returned to the ring, so the effective margin is 2-3 packets. */
+#define RX_GATE_FREE   (3 * USJ_PKT)
+#define RX_POLL_MS     1000         /* REPL read timeout: rx_ungate runs at least this often */
 #define IDLE_STARVE_MS 100          /* see let_idle_run */
-#define IDLE_WAIT_TICKS 10          /* at most this long per wait (100 ms at 100 Hz) */
+#define IDLE_WAIT_TICKS pdMS_TO_TICKS(100)  /* at most this long per wait */
+#define TX_CHUNK       512          /* staging buffer: one driver write per chunk */
+#define TX_TIMEOUT_MS  50           /* the VFS's TX_FLUSH_TIMEOUT_US */
+#define LOG_LINE_MAX   256          /* longer log lines are formatted into the heap */
 
 struct console_req {
     proto_ctx_t ctx;
@@ -78,9 +110,71 @@ static atomic_uint s_idle_tick;     /* tick count when the idle task last ran */
 static atomic_uint s_idle_runs;     /* bumped on every idle task pass */
 static char s_line[CONFIG_EMBPET_CMDLINE_MAX + 1];
 static char *s_argv[ARGV_MAX];
+static char s_tx[TX_CHUNK];         /* these three are guarded by flockfile(stdout) */
+static bool s_tx_stalled;           /* a 50 ms wait timed out; set until a chunk fits */
+static char s_log[LOG_LINE_MAX];
+static portMUX_TYPE s_rx_mux = portMUX_INITIALIZER_UNLOCKED;
+
+/* ---------------------------------------------------------------- output */
+
+/* Caller holds flockfile(stdout). The VFS's per-byte logic, applied per chunk. */
+static bool tx_flush(size_t n)
+{
+    if (n == 0) {
+        return true;
+    }
+    if (usb_serial_jtag_write_bytes(s_tx, n, 0) > 0) {
+        s_tx_stalled = false;
+        return true;
+    }
+    if (s_tx_stalled) {
+        return false;
+    }
+    if (usb_serial_jtag_write_bytes(s_tx, n, pdMS_TO_TICKS(TX_TIMEOUT_MS)) > 0) {
+        return true;
+    }
+    s_tx_stalled = true;
+    return false;
+}
+
+bool console_out(const char *s, size_t n)
+{
+    if (n == 0) {
+        return true;
+    }
+    if (!usb_serial_jtag_is_connected()) {
+        return false;
+    }
+    if (!usb_serial_jtag_is_driver_installed()) {   /* before console_start: the VFS path */
+        (void)fwrite(s, 1, n, stdout);
+        (void)fflush(stdout);
+        return true;
+    }
+    flockfile(stdout);
+    (void)fflush(stdout);           /* text another stdio caller buffered goes out first */
+    bool all = true;
+    size_t o = 0;
+    for (size_t k = 0; k < n && all; k++) {
+        if (o + 2 > sizeof(s_tx)) {
+            all = tx_flush(o);      /* a dropped chunk ends this write: truncate, never splice */
+            o = 0;
+        }
+        if (s[k] == '\n') {
+            s_tx[o++] = '\r';
+        }
+        s_tx[o++] = s[k];
+    }
+    if (all) {
+        all = tx_flush(o);
+    }
+    funlockfile(stdout);
+    return all;
+}
 
 /* ---------------------------------------------------------------- log sink */
 
+/* With whole-chunk writes the TX ring rarely fills to the last byte, so write_ready() alone
+ * misses most stalls: a line that console_out() could not write whole is counted too. */
 static int log_vprintf(const char *fmt, va_list ap)
 {
     if (!usb_serial_jtag_is_connected() ||
@@ -88,7 +182,30 @@ static int log_vprintf(const char *fmt, va_list ap)
         atomic_fetch_add(&s_log_dropped, 1);
         return 0;
     }
-    return vprintf(fmt, ap);
+    flockfile(stdout);
+    va_list aq;
+    va_copy(aq, ap);
+    bool sent = true;
+    int len = vsnprintf(s_log, sizeof(s_log), fmt, ap);
+    if (len >= (int)sizeof(s_log)) {
+        char *big = malloc((size_t)len + 1);
+        if (big != NULL) {
+            vsnprintf(big, (size_t)len + 1, fmt, aq);
+            sent = console_out(big, (size_t)len);
+            free(big);
+        } else {                                    /* cut, but keep the line a line */
+            s_log[sizeof(s_log) - 2] = '\n';
+            sent = console_out(s_log, sizeof(s_log) - 1);
+        }
+    } else if (len > 0) {
+        sent = console_out(s_log, (size_t)len);
+    }
+    va_end(aq);
+    funlockfile(stdout);
+    if (!sent) {
+        atomic_fetch_add(&s_log_dropped, 1);
+    }
+    return len;
 }
 
 uint32_t console_log_dropped(void)
@@ -331,12 +448,6 @@ static void run_line(const esc_line_t *l)
 
 /* ---------------------------------------------------------------- REPL */
 
-static void out(const char *s, size_t n)
-{
-    fwrite(s, 1, n, stdout);
-    fflush(stdout);
-}
-
 static bool idle_hook(void)
 {
     atomic_store(&s_idle_tick, (unsigned)xTaskGetTickCount());
@@ -344,17 +455,18 @@ static bool idle_hook(void)
     return true;
 }
 
-/* While input is waiting the REPL never blocks, and each command costs CPU mostly in the
- * stdout path (about 10 us per byte with the driver, README 3.1): a host sending `sys info`
- * back to back kept this task at about 95% CPU. The idle task then ran only in the gaps no
- * priority 1-2 task wanted, so a TLS handshake (tg tasks, priority 2) after boot, or a host
- * keeping a few commands in flight at any time, starved it for 5 s and tripped the task
- * watchdog (embpet-94q). So after each command and each input chunk, once the idle task has
- * not run for IDLE_STARVE_MS, the REPL sleeps tick by tick until it has run, for at most
- * IDLE_WAIT_TICKS (a sleep of one tick only lasts to the next tick boundary, and priority
- * 1-2 tasks may use all of it). That leaves lower tasks and the idle task a share of the CPU
- * while commands are still answered; a watchdog report then points at a task that hogs the
- * CPU itself. */
+/* While input is waiting the REPL never blocks. When stdout still went through the per-byte
+ * VFS (about 10 us per byte), a host sending `sys info` back to back kept this task at about
+ * 95% CPU. The idle task then ran only in the gaps no priority 1-2 task wanted, so a TLS
+ * handshake (tg tasks, priority 2) after boot, or a host keeping a few commands in flight at
+ * any time, starved it for 5 s and tripped the task watchdog (embpet-94q). Batched output
+ * (embpet-s2j.4) cut the cost per command 3-6x, but a host keeping several commands in
+ * flight still keeps this task busy. So after each command and each input chunk, once the
+ * idle task has not run for IDLE_STARVE_MS, the REPL sleeps tick by tick until it has run,
+ * for at most IDLE_WAIT_TICKS (a sleep of one tick only lasts to the next tick boundary, and
+ * priority 1-2 tasks may use all of it). That leaves lower tasks and the idle task a share
+ * of the CPU while commands are still answered; a watchdog report then points at a task
+ * that hogs the CPU itself. */
 static void let_idle_run(void)
 {
     TickType_t since = xTaskGetTickCount() - (TickType_t)atomic_load(&s_idle_tick);
@@ -362,9 +474,49 @@ static void let_idle_run(void)
         return;
     }
     unsigned runs = atomic_load(&s_idle_runs);
-    for (int k = 0; k < IDLE_WAIT_TICKS && atomic_load(&s_idle_runs) == runs; k++) {
+    for (TickType_t k = 0; k < IDLE_WAIT_TICKS && atomic_load(&s_idle_runs) == runs; k++) {
         vTaskDelay(1);
     }
+}
+
+/* Input flow control (embpet-s2j.3). The driver's ISR reads every USB packet out of the
+ * 64-byte RX FIFO into the RX ring and drops it when the ring is full, so while a command
+ * blocks the REPL (`tg send`, up to 10 s) a host sending more than the ring holds lost
+ * input. The driver calls this hook from its ISR after each packet it queued: once less
+ * than RX_GATE_FREE is free, the RX packet interrupt goes off. The next packet then stays in
+ * the FIFO and the hardware NAKs further ones, so the host's USB stack holds them and
+ * retries; nothing is dropped and no RAM is added. rx_ungate() turns the interrupt back on
+ * after the REPL has read enough.
+ * The driver itself does an unlocked read-modify-write of the interrupt enable register in
+ * task context (usb_serial_jtag_write_bytes enabling the TX interrupt), which can race both
+ * ways:
+ *  - it can turn RX back on while gated. RX_GATE_FREE leaves room for more packets, and each
+ *    packet let through re-gates.
+ *  - a preempted lower-priority writer can store a stale value with RX off after the REPL
+ *    ungated. So rx_ungate() decides from the hardware enable bit, not from a flag, and the
+ *    REPL reads with a timeout (RX_POLL_MS), so it re-enables input within that time even
+ *    when the ring is empty. */
+static void rx_gate(usj_select_notif_t notif, BaseType_t *task_woken)
+{
+    (void)task_woken;
+    /* usb_serial_jtag_get_read_bytes_available() calls vRingbufferGetInfo, whose
+     * portENTER_CRITICAL only masks interrupts on the single-core RISC-V port, so it is safe
+     * here (the driver ISR calls it too); it would trip
+     * CONFIG_FREERTOS_CHECK_PORT_CRITICAL_COMPLIANCE, which is off. */
+    if (notif == USJ_SELECT_READ_NOTIF &&
+        USJ_RX_RING - usb_serial_jtag_get_read_bytes_available() < RX_GATE_FREE) {
+        usb_serial_jtag_ll_disable_intr_mask(USB_SERIAL_JTAG_INTR_SERIAL_OUT_RECV_PKT);
+    }
+}
+
+static void rx_ungate(void)
+{
+    taskENTER_CRITICAL(&s_rx_mux);                  /* no rx_gate between check and enable */
+    if (!(usb_serial_jtag_ll_get_intr_ena_status() & USB_SERIAL_JTAG_INTR_SERIAL_OUT_RECV_PKT) &&
+        USJ_RX_RING - usb_serial_jtag_get_read_bytes_available() >= RX_GATE_FREE) {
+        usb_serial_jtag_ll_ena_intr_mask(USB_SERIAL_JTAG_INTR_SERIAL_OUT_RECV_PKT);
+    }
+    taskEXIT_CRITICAL(&s_rx_mux);
 }
 
 static void repl_task(void *arg)
@@ -375,9 +527,10 @@ static void repl_task(void *arg)
     char echo[RX_CHUNK * 3];                       /* worst case: "\b \b" per byte */
 
     esc_line_init(&line, s_line, sizeof(s_line));
-    out(PROMPT, strlen(PROMPT));
+    console_out(PROMPT, strlen(PROMPT));
     for (;;) {
-        int n = usb_serial_jtag_read_bytes(in, sizeof(in), portMAX_DELAY);
+        int n = usb_serial_jtag_read_bytes(in, sizeof(in), pdMS_TO_TICKS(RX_POLL_MS));
+        rx_ungate();
         size_t ne = 0;
         bool wipe = false;
         for (int k = 0; k < n; k++) {
@@ -391,7 +544,7 @@ static void repl_task(void *arg)
                 break;
             case ESC_LINE_DONE:
                 echo[ne++] = '\n';
-                out(echo, ne);
+                console_out(echo, ne);
                 ne = 0;
                 run_line(&line);
                 /* The line may hold a secret (`tg token`, `wifi set`): do not leave it in
@@ -399,7 +552,7 @@ static void repl_task(void *arg)
                 mbedtls_platform_zeroize(s_line, sizeof(s_line));
                 wipe = true;
                 esc_line_reset(&line);
-                out(PROMPT, strlen(PROMPT));
+                console_out(PROMPT, strlen(PROMPT));
                 let_idle_run();                     /* one chunk can hold many commands */
                 break;
             case ESC_LINE_IGNORED:
@@ -407,11 +560,14 @@ static void repl_task(void *arg)
             }
         }
         if (ne > 0) {
-            out(echo, ne);
+            console_out(echo, ne);
         }
         if (wipe) {                                 /* the typed bytes, as read and echoed */
             mbedtls_platform_zeroize(in, sizeof(in));
             mbedtls_platform_zeroize(echo, sizeof(echo));
+            flockfile(stdout);
+            mbedtls_platform_zeroize(s_tx, sizeof(s_tx));
+            funlockfile(stdout);
         }
         let_idle_run();
     }
@@ -426,8 +582,12 @@ static void help_handler(console_req_t *req)
     for (size_t k = 0; k < n; k++) {
         const cmd_entry_t *e = &s_cmds[k];
         arg_dstr_t ds = arg_dstr_create();
-        arg_print_syntax_ds(ds, e->table, "");
-        printf("%s%s\n    %s\n", e->cmd->name, arg_dstr_cstr(ds), e->cmd->help ? e->cmd->help : "");
+        arg_dstr_cat(ds, e->cmd->name);
+        arg_print_syntax_ds(ds, e->table, "\n    ");
+        arg_dstr_cat(ds, e->cmd->help ? e->cmd->help : "");
+        arg_dstr_catc(ds, '\n');
+        const char *text = arg_dstr_cstr(ds);
+        console_out(text, strlen(text));
         arg_dstr_destroy(ds);
         cJSON_AddItemToArray(names, cJSON_CreateString(e->cmd->name));
     }
@@ -449,6 +609,9 @@ esp_err_t console_start(void)
     if (err != ESP_OK) {
         return err;
     }
+#ifdef CONFIG_EMBPET_CONSOLE_PROBE
+    console_probe_register();
+#endif
     atomic_store(&s_idle_tick, (unsigned)xTaskGetTickCount());
     err = esp_register_freertos_idle_hook(idle_hook);
     if (err != ESP_OK) {
@@ -462,6 +625,7 @@ esp_err_t console_start(void)
     if (err != ESP_OK) {
         return err;
     }
+    usb_serial_jtag_set_select_notif_callback(rx_gate);    /* select() is never used here */
     usb_serial_jtag_vfs_use_driver();
     esp_log_set_vprintf(log_vprintf);
     if (xTaskCreate(repl_task, "console", REPL_STACK, NULL, REPL_PRIO, NULL) != pdPASS) {

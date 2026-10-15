@@ -5,12 +5,15 @@ endif()
 if(CONFIG_EMBPET_CONSOLE_SOAK)
     list(APPEND srcs "console_soak.c")
 endif()
+if(CONFIG_EMBPET_CONSOLE_PROBE)
+    list(APPEND srcs "console_probe.c")
+endif()
 
 idf_component_register(SRCS ${srcs}
                        INCLUDE_DIRS include
                        REQUIRES json esp_common
                        PRIV_REQUIRES console log esp_driver_usb_serial_jtag esp_app_format
-                                     esp_system esp_timer mbedtls)
+                                     esp_system esp_timer hal mbedtls)
 
 # Ring size and byte cap come from Kconfig; proto_core.h falls back to 32 / 16384 on the host.
 target_compile_definitions(${COMPONENT_LIB} PUBLIC

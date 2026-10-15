@@ -15,23 +15,37 @@ functional: every command answers with exactly one parseable res (rid/actor echo
   event (reset_reason software) is in the ring once. Production firmware (build-86h).
 
 soak: needs the soak firmware (CONFIG_EMBPET_CONSOLE_SOAK: a soak event and a WARN log
-  every 100 ms). Reads sys info, closes the port for SEC seconds, reopens and checks: same
-  boot id, uptime advanced by about SEC, commands still answer, `evt since <last seq>`
-  replays the newest events with truncated:true, and the replayed soak events show that
-  event writes, log writes and the generator's 100 ms loop never stalled.
+  every 100 ms). Reads sys info (first waiting for uptime 16 s: the generator keeps its
+  boot-time maxima apart, embpet-s2j.5, and they are only reported), closes the port for
+  SEC seconds, reopens and checks: same boot id, uptime advanced by about SEC, log lines
+  were dropped, commands still answer,
+  `evt since <last seq>` replays the newest events with truncated:true, and the replayed
+  soak events show that event writes, log writes and the generator's 100 ms loop never
+  stalled.
 
 reopen (embpet-s2j.1): N separate embpet_cli.py runs keep the boot id and a rising
   uptime (opening the port does not reset the chip); `embpet_cli.py --monitor 1 --reset`
   still resets it.
+
+pipeline (embpet-s2j.3): needs the probe firmware (components/proto/probe.defaults).
+  `probe sleep MS` blocks the console like a pending `tg send`, and right behind it the
+  host writes LINES `probe echo` commands of BYTES text each (default 10 x 1000, about
+  10 KB). Every line must be answered once, whole (length and Adler-32), in order. Then
+  `probe rxoff` turns the USB RX interrupt off as a lost re-enable would, and the next
+  command must still be answered within 1.5 s.
 
 Prints a JSON summary; exit 0 = all checks passed, 1 = a check failed, 2 = serial error.
 """
 import argparse
 import json
 import os
+import random
+import string
 import subprocess
 import sys
+import threading
 import time
+import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from embpet_cli import find_port, open_port  # noqa: E402
@@ -42,6 +56,7 @@ except ImportError:
     sys.exit("pyserial missing: run with scripts/idf.sh python ...")
 
 CMDLINE_MAX = 4400
+SOAK_SETTLE_S = 16      # the soak generator's checked maxima start at uptime 15 s (console_soak.c)
 
 
 class Board:
@@ -241,6 +256,11 @@ def soak(port, closed):
     f0, _ = b.cmd("sys info -i s1", "s1")
     if not c.check("sys info before close", f0 and f0.get("ok"), f0):
         return c, {}
+    if f0.get("uptime_s", 0) < SOAK_SETTLE_S:       # close only after the boot window
+        time.sleep(SOAK_SETTLE_S - f0["uptime_s"])
+        f0, _ = b.cmd("sys info -i s0", "s0")
+        if not c.check("sys info after the settle wait", f0 and f0.get("ok"), f0):
+            return c, {}
     soak_evts = [x for x in b.frames if x.get("ev") == "soak"]
     c.check("soak generator running", len(soak_evts) > 5, len(soak_evts))
     last_seq = max(x["seq"] for x in b.frames if x.get("t") == "evt")
@@ -277,10 +297,13 @@ def soak(port, closed):
     last_soak = [x for x in b.frames if x.get("ev") == "soak"]
     if last_soak:
         s = last_soak[-1]
-        stats = {k: s.get(k) for k in ("n", "max_evt_us", "max_log_us", "max_period_us")}
+        stats = {k: s.get(k) for k in ("n", "settled", "max_evt_us", "max_log_us",
+                                       "max_period_us", "boot_max_evt_us", "boot_max_log_us",
+                                       "boot_max_period_us")}
+    # Only the settled maxima are checked; boot_max_* are reported (embpet-s2j.5).
     c.check("no output stall > 60 ms, generator loop never late > 200 ms",
-            stats and stats["max_evt_us"] < 60000 and stats["max_log_us"] < 60000
-            and stats["max_period_us"] < 200000, stats)
+            stats and stats["settled"] is True and stats["max_evt_us"] < 60000
+            and stats["max_log_us"] < 60000 and stats["max_period_us"] < 200000, stats)
     c.check("generator kept counting while closed",
             stats and stats["n"] * 0.1 >= gap * 0.9, {"n": stats.get("n"), "gap": gap})
     for i in range(5):
@@ -332,6 +355,70 @@ def reopen(port, n):
                                              f.get("reset_reason")]}
 
 
+def pipeline(port, sleep_ms, lines, length):
+    """embpet-s2j.3: while one command blocks for SLEEP_MS, the host pipelines LINES
+    `probe echo` commands of LENGTH text bytes each (written by a second thread, so the main
+    thread keeps reading echo and frames). Every line must arrive whole: one ok res per rid,
+    with the text's length and Adler-32, in send order."""
+    c = Checks()
+    b = Board(port, settle=1.0)
+    f, _ = b.cmd("probe nop -i p0", "p0")
+    if not c.check("probe build (probe nop answers)", f and f.get("ok") is True, f):
+        return c, {}
+    rnd = random.Random(sleep_ms * 7919 + lines)
+    texts = ["".join(rnd.choice(string.ascii_letters + string.digits) for _ in range(length))
+             for _ in range(lines)]
+    blob = "probe sleep -i p1 %d\n" % sleep_ms
+    blob += "".join("probe echo -i e%d -- %s\n" % (k, t) for k, t in enumerate(texts))
+    want = {"p1"} | {"e%d" % k for k in range(lines)}
+    start = len(b.frames)
+    done = {}
+
+    def writer():
+        t0 = time.monotonic()
+        b.send(blob)
+        done["write_s"] = time.monotonic() - t0
+    th = threading.Thread(target=writer)
+    t0 = time.monotonic()
+    th.start()
+    b.pump(sleep_ms / 1000.0 + 20.0,
+           lambda f: want <= set(b.res_by_rid) and "write_s" in done)
+    th.join(30.0)
+    elapsed = time.monotonic() - t0
+    res = [x for x in b.frames[start:] if x.get("t") == "res" and x.get("rid") in want]
+    by_rid = {x["rid"]: x for x in res}
+    c.check("sleep answered ok", by_rid.get("p1", {}).get("ok") is True, by_rid.get("p1"))
+    bad = []
+    for k, t in enumerate(texts):
+        x = by_rid.get("e%d" % k)
+        if not (x and x.get("ok") is True and x.get("len") == len(t)
+                and x.get("sum") == zlib.adler32(t.encode("ascii"))):
+            bad.append({"rid": "e%d" % k, "res": x})
+    c.check("every pipelined line arrived whole (len and Adler-32)", not bad, bad[:3])
+    order = [x["rid"] for x in res]
+    c.check("responses in send order", order == ["p1"] + ["e%d" % k for k in range(lines)],
+            order[:5])
+    dup = {r: n for r, n in b.res_by_rid.items() if n != 1}
+    c.check("exactly one res per rid", not dup, dup)
+    c.check("no broken frame lines", not b.bad_lines, b.bad_lines[:3])
+    f, _ = b.cmd("sys info -i p2", "p2")
+    c.check("responsive afterwards", f and f.get("ok") is True, f)
+    # Fault: RX interrupt off while not gated (a lost re-enable); the REPL's read timeout
+    # must turn it back on, so the next command is answered within about 1 s.
+    fx, _ = b.cmd("probe rxoff -i p3", "p3")
+    t_rx = time.monotonic()
+    fr, _ = b.cmd("probe nop -i p4", "p4", timeout=5.0)
+    recover_s = time.monotonic() - t_rx
+    c.check("input recovers from a lost RX re-enable within 1.5 s",
+            fx and fx.get("ok") is True and fr and fr.get("ok") is True and recover_s < 1.5,
+            {"rxoff": fx, "nop": fr, "recover_s": round(recover_s, 2)})
+    b.close()
+    return c, {"bytes": len(blob), "sleep_ms": sleep_ms, "lines": lines,
+               "answered": len(res), "write_s": round(done.get("write_s", -1), 2),
+               "elapsed_s": round(elapsed, 2), "heap_min": (f or {}).get("heap_min"),
+               "rx_recover_s": round(recover_s, 2)}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-p", "--port")
@@ -342,6 +429,10 @@ def main():
     sp.add_argument("--closed", type=float, default=120.0, metavar="SEC")
     rp = sub.add_parser("reopen")
     rp.add_argument("-n", type=int, default=10)
+    pp = sub.add_parser("pipeline")
+    pp.add_argument("--sleep", type=int, default=10000, metavar="MS")
+    pp.add_argument("--lines", type=int, default=10)
+    pp.add_argument("--length", type=int, default=1000, metavar="BYTES")
     a = ap.parse_args()
     port = a.port or find_port()
     try:
@@ -351,6 +442,8 @@ def main():
             c, info = functional(port), {}
         elif a.mode == "reopen":
             c, info = reopen(port, a.n)
+        elif a.mode == "pipeline":
+            c, info = pipeline(port, a.sleep, a.lines, a.length)
         else:
             c, info = soak(port, a.closed)
     except serial.SerialException as e:

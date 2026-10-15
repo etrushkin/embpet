@@ -14,7 +14,19 @@ menu "embpet proto"
         help
             A task emits a "soak" event and a WARN log line every 100 ms and
             reports the longest event write, log write and loop period it has
-            seen, so a host can show the firmware kept running while the port
-            was closed. Host side: tools/console_test.py soak.
+            seen since uptime 15 s, so a host can show the firmware kept running
+            while the port was closed. Host side: tools/console_test.py soak.
+
+    config EMBPET_CONSOLE_PROBE
+        bool "Console CPU probe commands (never enable in production)"
+        default n
+        depends on FREERTOS_GENERATE_RUN_TIME_STATS
+        help
+            Adds `probe cpu` (run-time counters of the console and idle tasks,
+            in us) and `probe nop` (an empty ok res), so a host can measure
+            console CPU per command (tools/console_cpu.py), and `probe sleep
+            <ms>` / `probe echo <text>` / `probe rxoff` to test input that
+            arrives while a command blocks and the RX flow control
+            (tools/console_test.py pipeline).
 
 endmenu
