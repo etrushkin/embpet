@@ -1,8 +1,13 @@
 /* Test-only build (CONFIG_EMBPET_TG_TEST with the bridge, tools/bridge_test.py), never in
  * production. Commands to drive the bridge without a Telegram user and to measure it:
  *
- *  - tg t_owner <chat>         store the owner chat id (0 clears it); stands in for the
- *                              pairing / `tg owner` commands of embpet-z5d. Answers ok only.
+ *  - tg t_owner <chat>         store the owner chat id (0 clears it); bypasses `tg owner`
+ *                              (accepts a negative id without --). Answers ok only.
+ *  - tg t_pairttl <s>          validity of the next `tg pair` (expiry tests)
+ *  - tg t_live <0|1>           1: the online notice / pairing confirmation really go out
+ *                              (default 0: recorded only)
+ *  - tg t_notice               notices / confirmations since boot, their latest text,
+ *                              pairing seconds left
  *  - tg t_untoken              clear the bot token (tg state unconfigured: nothing is sent)
  *  - tg t_pend <msg> -a A      record msg as pending for A, exactly as a successful
  *                              tg send does (pending / pending_dropped events)
@@ -200,8 +205,86 @@ static const console_cmd_t s_t_fault = {
     .handler = t_fault,
 };
 
+/* ---- tg t_pairttl <s> / tg t_live <0|1> / tg t_notice ---- */
+
+static struct arg_int *s_ttl_arg;
+static void *s_ttl_args[2];
+
+static void t_pairttl(console_req_t *req)
+{
+    int v = s_ttl_arg->ival[0];
+    if (v < 1 || v > 300) {
+        console_err(req, CONSOLE_ERR_BAD_ARGS, "1..300");
+        return;
+    }
+    bridge_test_pair_ttl((uint32_t)v);
+    console_ok(req, NULL);
+}
+
+static const console_cmd_t s_t_pairttl = {
+    .name = "tg t_pairttl",
+    .help = "TEST BUILD: validity in seconds of the next tg pair (default 300)",
+    .args = s_ttl_args,
+    .handler = t_pairttl,
+};
+
+static struct arg_int *s_live_arg;
+static void *s_live_args[2];
+
+static void t_live(console_req_t *req)
+{
+    int v = s_live_arg->ival[0];
+    if (v != 0 && v != 1) {
+        console_err(req, CONSOLE_ERR_BAD_ARGS, "0 or 1");
+        return;
+    }
+    bridge_test_live(v == 1);
+    console_ok(req, NULL);
+}
+
+static const console_cmd_t s_t_live = {
+    .name = "tg t_live",
+    .help = "TEST BUILD: 1 = online notice and pairing confirmation really go to Telegram",
+    .args = s_live_args,
+    .handler = t_live,
+};
+
+static void t_notice(console_req_t *req)
+{
+    bridge_test_notice_t n;
+    bridge_test_notice(&n);
+    cJSON *p = cJSON_CreateObject();
+    if (p == NULL) {
+        oom(req);
+        return;
+    }
+    cJSON_AddBoolToObject(p, "live", n.live);
+    cJSON_AddNumberToObject(p, "notices", n.notices);
+    cJSON_AddNumberToObject(p, "confirms", n.confirms);
+    cJSON_AddNumberToObject(p, "pair_left_s", n.pair_left_s);
+    cJSON_AddStringToObject(p, "notice_text", n.notice_text);
+    cJSON_AddStringToObject(p, "confirm_text", n.confirm_text);
+    console_ok(req, p);
+}
+
+static const console_cmd_t s_t_notice = {
+    .name = "tg t_notice",
+    .help = "TEST BUILD: online notices / pairing confirmations since boot, pairing time left",
+    .handler = t_notice,
+};
+
 void bridge_test_register(void)
 {
+    s_ttl_arg = arg_int1(NULL, NULL, "<s>", "pairing validity");
+    s_live_arg = arg_int1(NULL, NULL, "<0|1>", "really send notice/confirmation");
+    if (s_ttl_arg == NULL || s_live_arg == NULL) {
+        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+    }
+    s_ttl_args[0] = s_ttl_arg;
+    s_live_args[0] = s_live_arg;
+    ESP_ERROR_CHECK(console_register(&s_t_pairttl));
+    ESP_ERROR_CHECK(console_register(&s_t_live));
+    ESP_ERROR_CHECK(console_register(&s_t_notice));
     s_owner_arg = arg_str1(NULL, NULL, "<chat>", "owner chat id, 0 clears");
     s_pend_arg = arg_str1(NULL, NULL, "<msg>", "message id");
     s_inject_arg = arg_str1(NULL, NULL, "<json>", "one update object");

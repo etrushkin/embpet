@@ -2,15 +2,16 @@
 """Store the bot token from the git-ignored .env.local on the board without ever printing it
 (embpet-q9h). Agents use this instead of sourcing .env.local.
 
-  scripts/hw.sh python tools/tg_from_env.py [-p PORT] [--env FILE] [--cmd "tg t_token"]
+  scripts/hw.sh python tools/tg_from_env.py [-p PORT] [--env FILE] [--cmd "tg token"]
 
 Reads TG_TOKEN from .env.local itself (same parser as tools/wifi_from_env.py) and sends
 `<cmd> -- <token>` in-process with the tools/embpet package, so the token is never in argv
-(not visible in `ps`). --cmd defaults to the test-build command `tg t_token`
-(CONFIG_EMBPET_TG_TEST); pass "tg token" once the production command exists. Prints one
-JSON line, the res frame with the token masked as cfg does (123456:AA…xyz) and any other
-occurrence replaced by ***. Exit 0 = stored, 1 = the board refused it, 2 = .env.local
-unreadable / TG_TOKEN missing / no response.
+(not visible in `ps`). --cmd defaults to the production command `tg token`, which checks the
+token with Telegram (getMe) before storing it, so Wi-Fi must be up; pass "tg t_token" for the
+test build's unchecked store (CONFIG_EMBPET_TG_TEST). Prints one JSON line, the res frame
+with the token masked as cfg does (123456:AA…xyz) and any other occurrence replaced by ***.
+Exit 0 = stored, 1 = the board refused it, 2 = .env.local unreadable / TG_TOKEN missing / no
+response.
 """
 import argparse
 import json
@@ -50,7 +51,7 @@ def secrets_of(token):
     return out
 
 
-def set_token(token, port=None, cmd="tg t_token", board=None):
+def set_token(token, port=None, cmd="tg token", board=None):
     """Send `<cmd> -- <token>` in-process. Returns (exit code, res frame or None, error text);
     the error text never contains the token."""
     try:
@@ -70,7 +71,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-p", "--port")
     ap.add_argument("--env", default=os.path.join(W.ROOT, ".env.local"))
-    ap.add_argument("--cmd", default="tg t_token")
+    ap.add_argument("--cmd", default="tg token")
     a = ap.parse_args()
     try:
         token = load_token(a.env)

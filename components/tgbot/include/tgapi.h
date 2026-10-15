@@ -79,6 +79,14 @@ tg_status_t tgapi_call(tgapi_conn_t *c, const char *method, const char *body, tg
  * online state. TG_ERR_SERVER if the result has no username. */
 tg_status_t tgapi_get_me(tgapi_conn_t *c, char *bot, size_t cap, tg_resp_t *err);
 
+/* getMe with a candidate token that is not stored (`tg token`): TG_OK and the bot username
+ * if Telegram accepts it, TG_ERR_AUTH if it rejects it, other statuses as for any call.
+ * Changes no state and emits no event; closes the session afterwards and points the
+ * connection's URL back at the stored token (none: at the bare host), so the candidate does not
+ * stay in the handle. */
+tg_status_t tgapi_check_token(tgapi_conn_t *c, const char *token, char *bot, size_t cap,
+                              tg_resp_t *err);
+
 /* deleteWebhook (README 4: long polling fails while a webhook exists); pending updates
  * are kept. */
 tg_status_t tgapi_delete_webhook(tgapi_conn_t *c, tg_resp_t *err);

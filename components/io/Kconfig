@@ -9,4 +9,12 @@ menu "embpet io"
             length can be measured on the chip itself. Used by
             tools/io_test.py.
 
+    config EMBPET_LED_TEST
+        bool "On-chip status LED test hooks (never enable in production)"
+        default n
+        help
+            Compiles in test-only code: the LED pin becomes INPUT_OUTPUT and an
+            any-edge ISR timestamps its edges (`led t_edges`), so the pattern
+            can be measured on the chip. Used by tools/led_test.py.
+
 endmenu

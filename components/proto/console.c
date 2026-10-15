@@ -34,6 +34,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "mbedtls/platform_util.h"
 #include "proto.h"
 #include "sdkconfig.h"
 
@@ -343,6 +344,7 @@ static void repl_task(void *arg)
     for (;;) {
         int n = usb_serial_jtag_read_bytes(in, sizeof(in), portMAX_DELAY);
         size_t ne = 0;
+        bool wipe = false;
         for (int k = 0; k < n; k++) {
             switch (esc_line_feed(&line, in[k])) {
             case ESC_LINE_STORED:
@@ -357,6 +359,10 @@ static void repl_task(void *arg)
                 out(echo, ne);
                 ne = 0;
                 run_line(&line);
+                /* The line may hold a secret (`tg token`, `wifi set`): do not leave it in
+                 * RAM. s_argv points into it, so it goes only after the command ran. */
+                mbedtls_platform_zeroize(s_line, sizeof(s_line));
+                wipe = true;
                 esc_line_reset(&line);
                 out(PROMPT, strlen(PROMPT));
                 break;
@@ -366,6 +372,10 @@ static void repl_task(void *arg)
         }
         if (ne > 0) {
             out(echo, ne);
+        }
+        if (wipe) {                                 /* the typed bytes, as read and echoed */
+            mbedtls_platform_zeroize(in, sizeof(in));
+            mbedtls_platform_zeroize(echo, sizeof(echo));
         }
     }
 }

@@ -10,7 +10,7 @@ idf_component_register(SRCS ${srcs}
                        INCLUDE_DIRS include
                        REQUIRES json esp_common
                        PRIV_REQUIRES console log esp_driver_usb_serial_jtag esp_app_format
-                                     esp_system esp_timer)
+                                     esp_system esp_timer mbedtls)
 
 # Ring size and byte cap come from Kconfig; proto_core.h falls back to 32 / 16384 on the host.
 target_compile_definitions(${COMPONENT_LIB} PUBLIC

@@ -4,6 +4,7 @@
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "io.h"
+#include "led.h"
 #include "proto.h"
 #include "state.h"
 #include "tgapi.h"
@@ -45,6 +46,7 @@ void app_main(void)
     state_init();
     proto_emit_boot();
     io_inputs_init();                       /* step 4: events need proto */
+    led_init();                             /* booting = solid on until the end of app_main */
 
     /* Console REPL (step 5). */
     cmd_sys_register();

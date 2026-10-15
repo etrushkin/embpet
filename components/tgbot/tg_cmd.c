@@ -1,4 +1,5 @@
-/* Console commands: tg send, tg pending, tg ack, tg status (README 3.4). */
+/* Console commands: tg send, tg pending, tg ack, tg status, tg token, tg pair, tg owner
+ * (README 3.4). */
 #include "bridge_priv.h"
 
 #include <stdlib.h>
@@ -8,6 +9,7 @@
 #include "cfg.h"
 #include "console.h"
 #include "mbedtls/platform_util.h"
+#include "owner_core.h"
 #include "state.h"
 
 #define MSG_ID_MAX ((1LL << 53) - 1)    /* larger ids would not survive a JSON number */
@@ -214,15 +216,131 @@ static const console_cmd_t s_tg_status = {
     .handler = tg_status,
 };
 
+/* ---- tg token <token> ---- */
+
+static struct arg_str *s_token_arg;
+static void *s_token_args[2];
+
+static void tg_token(console_req_t *req)
+{
+    char bot[STATE_BOT_LEN];
+    char msg[128];
+    const char *code = bridge_set_token(s_token_arg->sval[0], bot, sizeof(bot), msg, sizeof(msg));
+    if (code != NULL) {
+        console_err(req, code, msg);
+        return;
+    }
+    char masked[CFG_MASK_BUF_SIZE];
+    cfg_mask_token(s_token_arg->sval[0], masked, sizeof(masked));
+    cJSON *p = cJSON_CreateObject();
+    if (p == NULL || cJSON_AddStringToObject(p, "bot", bot) == NULL ||
+        cJSON_AddStringToObject(p, "token", masked) == NULL) {
+        cJSON_Delete(p);
+        oom(req);
+        return;
+    }
+    console_ok(req, p);
+}
+
+static const console_cmd_t s_tg_token = {
+    .name = "tg token",
+    .help = "Check the bot token with Telegram, store it, restart the poller (give it after --)",
+    .args = s_token_args,
+    .handler = tg_token,
+};
+
+/* ---- tg pair ---- */
+
+static void tg_pair(console_req_t *req)
+{
+    char code[PAIR_CODE_BUF];
+    char msg[64];
+    uint32_t expires_s = 0;
+    const char *err = bridge_pair_start(code, &expires_s, msg, sizeof(msg));
+    if (err != NULL) {
+        console_err(req, err, msg);
+        return;
+    }
+    cJSON *p = cJSON_CreateObject();
+    if (p == NULL || cJSON_AddStringToObject(p, "code", code) == NULL ||
+        cJSON_AddNumberToObject(p, "expires_s", expires_s) == NULL) {
+        cJSON_Delete(p);
+        oom(req);
+        return;
+    }
+    console_ok(req, p);
+}
+
+static const console_cmd_t s_tg_pair = {
+    .name = "tg pair",
+    .help = "Print a 6-digit code (5 min); send /start <code> to the bot to bind the owner chat",
+    .handler = tg_pair,
+};
+
+/* ---- tg owner [<chat_id> | --clear] ---- */
+
+static struct arg_str *s_owner_id;
+static struct arg_lit *s_owner_clear;
+static void *s_owner_args[3];
+
+static void tg_owner(console_req_t *req)
+{
+    bool clear = s_owner_clear->count > 0;
+    esp_err_t err = ESP_OK;
+    if (clear && s_owner_id->count > 0) {
+        console_err(req, CONSOLE_ERR_BAD_ARGS, "give a chat id or --clear, not both");
+        return;
+    }
+    if (clear) {
+        err = bridge_owner_write(0);
+    } else if (s_owner_id->count > 0) {
+        int64_t chat;
+        if (!owner_parse_chat(s_owner_id->sval[0], &chat)) {
+            console_err(req, CONSOLE_ERR_BAD_ARGS,
+                        "<chat_id> must be a non-zero integer (put -- before a negative one)");
+            return;
+        }
+        err = bridge_owner_write(chat);
+    }
+    if (err != ESP_OK) {
+        console_err(req, err == ESP_ERR_INVALID_ARG ? CONSOLE_ERR_BAD_ARGS : CONSOLE_ERR_INTERNAL,
+                    esp_err_to_name(err));
+        return;
+    }
+    int64_t owner = cfg_get_tg_owner();
+    cJSON *p = cJSON_CreateObject();
+    if (p == NULL || (owner != 0 ? cJSON_AddNumberToObject(p, "chat_id", (double)owner)
+                                 : cJSON_AddNullToObject(p, "chat_id")) == NULL) {
+        cJSON_Delete(p);
+        oom(req);
+        return;
+    }
+    console_ok(req, p);
+}
+
+static const console_cmd_t s_tg_owner = {
+    .name = "tg owner",
+    .help = "Show the owner chat, set it (<chat_id>, after -- if negative) or --clear it",
+    .args = s_owner_args,
+    .handler = tg_owner,
+};
+
 void tg_cmd_register(void)
 {
+    s_token_arg = arg_str1(NULL, NULL, "<token>", "bot token from @BotFather");
+    s_owner_id = arg_str0(NULL, NULL, "<chat_id>", "owner chat id");
+    s_owner_clear = arg_lit0(NULL, "clear", "unbind the owner chat");
     s_send_reply = arg_str0("r", NULL, "<msg>", "reply to this message id");
     s_send_text = arg_str1(NULL, NULL, "<text>", "message text (up to 4096 bytes)");
     s_ack_older = arg_str0(NULL, "older", "<s>", "ack all older than s seconds (0 = all)");
     s_ack_msg = arg_str0("m", NULL, "<msg>", "ack one message id");
-    if (s_send_reply == NULL || s_send_text == NULL || s_ack_older == NULL || s_ack_msg == NULL) {
+    if (s_send_reply == NULL || s_send_text == NULL || s_ack_older == NULL || s_ack_msg == NULL ||
+        s_token_arg == NULL || s_owner_id == NULL || s_owner_clear == NULL) {
         ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
     }
+    s_token_args[0] = s_token_arg;
+    s_owner_args[0] = s_owner_id;
+    s_owner_args[1] = s_owner_clear;
     s_send_args[0] = s_send_reply;
     s_send_args[1] = s_send_text;
     s_ack_args[0] = s_ack_older;
@@ -232,4 +350,7 @@ void tg_cmd_register(void)
     ESP_ERROR_CHECK(console_register(&s_tg_pending));
     ESP_ERROR_CHECK(console_register(&s_tg_ack));
     ESP_ERROR_CHECK(console_register(&s_tg_status));
+    ESP_ERROR_CHECK(console_register(&s_tg_token));
+    ESP_ERROR_CHECK(console_register(&s_tg_pair));
+    ESP_ERROR_CHECK(console_register(&s_tg_owner));
 }

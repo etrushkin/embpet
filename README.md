@@ -92,7 +92,8 @@ ESP-IDF **v5.5.x**, plain C, no Arduino. The Telegram client is the project's ow
 ### 2.1 Telegram bridge
 
 - **One owner chat.** The bot serves exactly one Telegram `chat_id`. Updates from any other chat are ignored and not answered.
-- **Binding the owner:** `tg pair` prints a 6-digit code (valid 5 min) and the owner sends `/start <code>` to the bot. Alternatively set the ID directly with `tg owner <chat_id>`.
+- **Binding the owner:** `tg pair` (needs a stored bot token) prints a random 6-digit code, valid 5 min. The owner sends `/start <code>` to the bot from the chat that should receive the messages (`tools/tg_pair.py` runs the whole flow). The poller accepts that message from any chat while pairing is active: it stores the chat as owner, emits `paired {chat_id}`, and the bot confirms there in plain text (best effort, one try; the `paired` event is authoritative). Pairing then ends. A wrong or expired code is ignored without an answer, and `/start@<other_bot>` commands are not attempts. 5 wrong codes cancel pairing, and setting a new token, setting or clearing the owner, or a new `tg pair` voids the earlier code. Running `tg pair` again re-binds the owner. Known limitation: anyone who knows the bot can send wrong codes and cancel the pairing; the fallback is a new `tg pair` or `tg owner <chat_id>`. Alternatively set the ID directly with `tg owner <chat_id>`.
+- **Setting the token:** `tg token <token>` asks Telegram (`getMe`) whether it accepts the token and stores it only if so, so Wi-Fi must be up; a rejected token gives `auth_error` and the old one stays. The bridge then restarts the poller (`deleteWebhook` included). The response and the logs show the bot name and the masked token only; the host must send the token without it appearing in `argv` (`tools/tg_from_env.py`).
 - **Outgoing:** `tg send -a A "text"` posts `[A] text` to the owner. The actor tag is rendered bold through Telegram `entities`, with no parse_mode, so message text needs no escaping. Plain text only, up to 4096 bytes UTF-8, and the whole message `[A] text` must also fit Telegram's limit of 4096 characters counted in UTF-16 code units (an emoji outside the BMP counts 2; the tag and its space count 3 + the actor length). Text over either limit is rejected (`err: too_long`), so with a 16-character actor at most 4077 ASCII characters fit.
 - **Threading:** `tg send -a A -r <msg_id> "text"` sends the message as a Telegram reply to an earlier message, e.g. continuing a conversation with the owner.
 - **Incoming (routing):**
@@ -104,7 +105,7 @@ ESP-IDF **v5.5.x**, plain C, no Arduino. The Telegram client is the project's ow
 - **Receiving:** long polling `getUpdates` (timeout 50 s, `allowed_updates=["message"]`) on its own task and HTTPS connection. Sends use a second keep-alive connection. On HTTP 429 the client honours `retry_after`. Polling starts once `getMe` and `deleteWebhook` have succeeded for the stored token. After a failed poll or a Wi-Fi drop the next `getUpdates` uses timeout 0, and after a Wi-Fi reconnect the send task probes once with `getMe`, so the bridge is `online` again within seconds rather than after the next long poll. Failed polls back off 1, 2, 4, … 30 s.
 - **Hint rate:** at most one hint reply per 10 s; further non-routable owner messages in that time get none. `tg send` requests go ahead of a queued hint.
 - **Delivery semantics:** at-least-once. An update's offset advances only after its `reply` event has been emitted (written to the host if one is connected, and stored in the event ring), and Telegram drops the update only when the next getUpdates confirms that offset. Telegram keeps unconfirmed updates for 24 h, so replies sent while the board was off arrive after boot. A reboot or crash between emitting and confirming delivers the reply again after boot (then with `"src":"prefix"`, since the table is gone); hosts dedupe by the reply's `msg` id.
-- **Online notice:** after each boot, once Telegram is first reachable, the bot posts `embpet online` with firmware version and reset reason. Not sent on later reconnects.
+- **Online notice:** after each boot, when Telegram is first reachable and an owner is set, the bot posts `embpet online · fw <version> · reset <reason>` (plain text; transient failures are retried, up to 3 attempts in all). Not sent on later reconnects, and not at all in a boot where no owner was set at that moment (pairing later in the boot gets the confirmation only).
 - **TLS:** server verification uses the IDF certificate bundle, with no pinned certificate. The default common-CA bundle (`CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN`) validates `api.telegram.org` (verified on the device). mbedTLS dynamic buffers are on to keep idle RAM low.
 - **Responses** larger than 16 KB are rejected; a getUpdates batch that is too large is fetched again one update at a time with a larger cap (docs/PLAN.md 1.2). HTTP 401/404 from the Bot API mean the token was rejected (`auth_error`); on 429 the client waits `retry_after`; network errors back off 1, 2, 4, 8, 16 s, then every 30 s.
 
@@ -114,8 +115,8 @@ Priority from top to bottom; the first matching row wins.
 
 | State | LED |
 |---|---|
-| Booting (app start until init done and Wi-Fi started) | solid on |
-| Not configured, or Wi-Fi/Telegram down | blink 1 Hz (500 ms on / 500 ms off) |
+| Booting (from LED init during startup until Wi-Fi and the Telegram bridge are started) | solid on |
+| Not configured, or Wi-Fi/Telegram down (including no token) | blink 1 Hz (500 ms on / 500 ms off) |
 | ≥1 unanswered | 1 s burst at 5 Hz (5 × 100 ms on / 100 ms off), then 3 s off; 4 s cycle |
 | Online, nothing pending | off |
 
@@ -236,9 +237,9 @@ The last 32 events are kept in RAM. After a host reconnects it can replay them w
 | `tg send -a A [-r MSG] "<text>"` | Send to the owner as actor A | `msg` (Telegram message_id) |
 | `tg pending [-a A]` | List unanswered | `items:[{msg,actor,age_s}]` |
 | `tg ack --older <s>` / `tg ack -m <msg>` | Mark answered: all older than *s* seconds (`0` = all), or one message | `acked` (count) |
-| `tg token <token>` | Store the bot token and restart the poller | `bot` (username, from `getMe`) |
-| `tg pair` | Start owner pairing | `code`, `expires_s` |
-| `tg owner [<chat_id>\|--clear]` | Show, set or clear the owner chat | `chat_id` |
+| `tg token <token>` | Check the bot token with Telegram, store it and restart the poller (errors: `bad_args` malformed, `offline` Wi-Fi/Telegram down, `auth_error` rejected, `timeout`, `busy` send queue full, `internal`) | `bot` (username, from `getMe`), `token` (masked) |
+| `tg pair` | Start owner pairing (`not_configured` without a token) | `code`, `expires_s` |
+| `tg owner [<chat_id>\|--clear]` | Show, set or clear the owner chat (a negative id goes after `--`) | `chat_id` (`null` if unset) |
 | `tg status` | Bridge status | `state`, `detail` (as in the `tg` event), `bot`, `owner` (`null` if unset), `token` (masked, `""` if unset), `pending` |
 | `wifi set "<ssid>" ["<pass>"]` | Store credentials; reconnects at once (the res does not wait for it; omit the password for an open network) | — (then `wifi` event) |
 | `wifi status` | Connection info | `state` (`up`/`down`/`unconfigured`), `ssid` (empty if unset), `txpower` (dBm); `ip` and `rssi` only when `up` |

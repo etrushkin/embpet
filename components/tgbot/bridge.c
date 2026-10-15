@@ -26,7 +26,15 @@
  * Telegram drops it only when the next getUpdates carries that offset. A reboot or crash
  * in between delivers the update again after boot: hosts dedupe on the reply's msg.
  *
- * Message texts and chat ids are never logged. */
+ * Owner binding: `tg pair` arms s_pair (code, 5 min); handle_update asks pair_check about
+ * every update BEFORE routing, because with no owner every update would be ignored. The
+ * right `/start <code>` from any chat stores that chat as owner, emits `paired`, and queues a
+ * plain confirmation. `tg token` validates the candidate with getMe on tg_send (the console
+ * never does TLS) and stores it only if Telegram accepts it. The online notice is sent by
+ * tg_send itself, once per boot: decided when Telegram is first online (an owner set then
+ * gets it, retried a few times; no owner then means none this boot).
+ *
+ * Message texts, chat ids, pairing codes and tokens are never logged. */
 #include "bridge_priv.h"
 #include "tgbot.h"
 
@@ -38,13 +46,16 @@
 #include "bridge_core.h"
 #include "cfg.h"
 #include "console.h"
+#include "esp_app_desc.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "mbedtls/platform_util.h"
+#include "owner_core.h"
 #include "proto.h"
 #include "state.h"
 #include "tgapi.h"
@@ -57,26 +68,36 @@ static const char *TAG = "tgbot";
 #define IDLE_TICK_MS 1000       /* the tasks re-check Wi-Fi and setup at least this often */
 #define OOM_RETRY_MS 1000
 #define HINT_MIN_INTERVAL_US (10 * 1000000LL)
+#define NOTICE_MAX_TRIES     3
+#define NOTICE_RETRY_MIN_MS  2000
 
-typedef enum { REQ_SEND, REQ_HINT } req_kind_t;
+/* REQ_SEND and REQ_TOKEN are waited for by the console (done != NULL); REQ_HINT and
+ * REQ_CONFIRM are plain texts to a chat, best effort. */
+typedef enum { REQ_SEND, REQ_HINT, REQ_CONFIRM, REQ_TOKEN } req_kind_t;
+typedef enum { PLAIN_HINT, PLAIN_CONFIRM, PLAIN_NOTICE } plain_kind_t;
 
 typedef struct {
     req_kind_t kind;
     int64_t chat;
     int64_t reply_to;
     char actor[ACTOR_BUF_SIZE];         /* REQ_SEND */
-    SemaphoreHandle_t done;             /* REQ_SEND: given by tg_send when finished */
+    char bot[STATE_BOT_LEN];            /* REQ_TOKEN result: the bot's username */
+    bool stored;                        /* REQ_TOKEN result: the token was saved */
+    SemaphoreHandle_t done;             /* waited kinds: given by tg_send when finished */
     bool finished;                      /* under s_req_mux */
     bool abandoned;                     /* under s_req_mux: the console stopped waiting, so
                                            tg_send frees the request */
     tg_status_t st;
     tg_resp_t err;
     int64_t msg_id;
-    char text[];
+    char text[];                        /* REQ_TOKEN: the candidate token (wiped on free) */
 } send_req_t;
 
-static SemaphoreHandle_t s_lock;        /* s_table, s_bot_id */
+static SemaphoreHandle_t s_bind;        /* owner / pairing / token writes (try_pair); taken
+                                           before s_lock, never inside it */
+static SemaphoreHandle_t s_lock;        /* s_table, s_bot_id, s_pair */
 static pending_table_t s_table;
+static pair_t s_pair;
 static int64_t s_bot_id;                /* user id of the latest valid token's bot; kept
                                            when the token is cleared (bridge_route) */
 static QueueHandle_t s_queue;           /* send_req_t *, consumed by tg_send */
@@ -92,6 +113,14 @@ static atomic_uint s_polls;             /* getUpdates attempts */
 static atomic_uint s_probes;            /* getMe probes (not the per-token setup) */
 #ifdef CONFIG_EMBPET_TG_TEST
 static atomic_bool s_fault_poll;        /* every getUpdates fails as a network error */
+/* Online notice and pairing confirmation are recorded instead of sent, until `tg t_live 1`:
+ * a test boot must not message a chat. */
+static atomic_bool s_capture = true;
+static atomic_uint s_pair_ttl_s = PAIR_TTL_S;
+static atomic_uint s_notice_n;          /* delivered (or captured) online notices */
+static atomic_uint s_confirm_n;         /* delivered (or captured) pairing confirmations */
+static char s_notice_text[128];         /* under s_req_mux */
+static char s_confirm_text[128];        /* under s_req_mux */
 #endif
 
 /* `pending` event, following the state.h subscriber rule. */
@@ -213,6 +242,13 @@ static void load_bot_id(void)
 static void on_cfg(cfg_key_t key, void *ctx)
 {
     (void)ctx;
+    if (key == CFG_KEY_TG_TOKEN || key == CFG_KEY_TG_OWNER) {
+        /* Another bot, or an owner now bound (also by this very pairing): a code shown
+         * earlier is void. */
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        pair_cancel(&s_pair);
+        xSemaphoreGive(s_lock);
+    }
     if (key == CFG_KEY_TG_TOKEN) {
         load_bot_id();
         atomic_fetch_add(&s_tok_gen, 1);
@@ -229,7 +265,31 @@ static void free_req(send_req_t *r)
     if (r->done != NULL) {
         vSemaphoreDelete(r->done);
     }
+    if (r->kind == REQ_TOKEN) {
+        mbedtls_platform_zeroize(r->text, strlen(r->text));
+    }
     free(r);
+}
+
+/* Queue a plain text for chat (kind REQ_HINT or REQ_CONFIRM). False if it was not queued
+ * (out of memory or queue full). */
+static bool queue_plain(req_kind_t kind, int64_t chat, int64_t reply_to, const char *text,
+                        bool front)
+{
+    size_t n = strlen(text);
+    send_req_t *r = calloc(1, sizeof(*r) + n + 1);
+    if (r == NULL) {
+        return false;
+    }
+    r->kind = kind;
+    r->chat = chat;
+    r->reply_to = reply_to;
+    memcpy(r->text, text, n + 1);
+    if ((front ? xQueueSendToFront(s_queue, &r, 0) : xQueueSend(s_queue, &r, 0)) != pdTRUE) {
+        free_req(r);
+        return false;
+    }
+    return true;
 }
 
 /* Best effort and at most one per HINT_MIN_INTERVAL_US, so a burst of owner messages
@@ -250,16 +310,8 @@ static void post_hint(int64_t chat, int64_t reply_to)
                  (int)(HINT_MIN_INTERVAL_US / 1000000));
         return;
     }
-    send_req_t *r = calloc(1, sizeof(*r) + sizeof(BRIDGE_HINT_TEXT));
-    if (r != NULL) {
-        r->kind = REQ_HINT;
-        r->chat = chat;
-        r->reply_to = reply_to;
-        memcpy(r->text, BRIDGE_HINT_TEXT, sizeof(BRIDGE_HINT_TEXT));
-        if (xQueueSend(s_queue, &r, 0) == pdTRUE) {
-            return;
-        }
-        free_req(r);
+    if (queue_plain(REQ_HINT, chat, reply_to, BRIDGE_HINT_TEXT, false)) {
+        return;
     }
     /* Not queued: give the slot back, unless another hint took it meanwhile. */
     portENTER_CRITICAL(&s_req_mux);
@@ -268,7 +320,7 @@ static void post_hint(int64_t chat, int64_t reply_to)
     }
     portEXIT_CRITICAL(&s_req_mux);
     atomic_fetch_add(&s_hints_dropped, 1);
-    ESP_LOGW(TAG, "hint dropped: %s", r != NULL ? "send queue full" : "out of memory");
+    ESP_LOGW(TAG, "hint dropped: send queue full or out of memory");
 }
 
 /* REQ_SEND result: hand it to the waiting console, or free it if the console gave up. */
@@ -288,9 +340,79 @@ static void finish_send(send_req_t *r)
 /* tg_send only: no sendMessage before this time after a 429 (retry_after). */
 static int64_t s_blocked_until_us;
 
+#ifdef CONFIG_EMBPET_TG_TEST
+static void record_plain(plain_kind_t kind, const char *text)
+{
+    char *dst = kind == PLAIN_NOTICE ? s_notice_text : s_confirm_text;
+    size_t n = strlen(text);
+    if (n >= sizeof(s_notice_text)) {
+        n = sizeof(s_notice_text) - 1;
+    }
+    portENTER_CRITICAL(&s_req_mux);
+    memcpy(dst, text, n);
+    dst[n] = '\0';
+    portEXIT_CRITICAL(&s_req_mux);
+    atomic_fetch_add(kind == PLAIN_NOTICE ? &s_notice_n : &s_confirm_n, 1);
+}
+#endif
+
+/* A plain text (no actor tag, no pending entry) to chat: hint, pairing confirmation or
+ * online notice. Honours a 429 block; nothing is sent while Wi-Fi is down. tg_send only. */
+static tg_status_t deliver_plain(tgapi_conn_t *conn, plain_kind_t kind, int64_t chat,
+                                 const char *text, int64_t reply_to, tg_resp_t *err)
+{
+    memset(err, 0, sizeof(*err));
+    int64_t now = esp_timer_get_time();
+    if (now < s_blocked_until_us) {
+        err->retry_after_s = (uint32_t)((s_blocked_until_us - now + 999999) / 1000000);
+        return TG_ERR_RETRY;
+    }
+    if (!wifi_up()) {
+        return TG_ERR_NET;
+    }
+#ifdef CONFIG_EMBPET_TG_TEST
+    if (kind != PLAIN_HINT && atomic_load(&s_capture)) {
+        record_plain(kind, text);
+        return TG_OK;
+    }
+#endif
+    int64_t msg_id = 0;
+    tg_status_t st = tgapi_send_message(conn, chat, NULL, text, reply_to, &msg_id, err);
+    if (st == TG_ERR_RETRY) {
+        s_blocked_until_us = esp_timer_get_time() + (int64_t)err->retry_after_s * 1000000;
+    }
+#ifdef CONFIG_EMBPET_TG_TEST
+    if (st == TG_OK && kind != PLAIN_HINT) {
+        record_plain(kind, text);
+    }
+#endif
+    return st;
+}
+
+/* REQ_TOKEN: Telegram must accept the candidate before it is stored. Storing runs the cfg
+ * callbacks here (tgapi: tg offline "token changed"; bridge: new token generation), and the
+ * loop then sets the new bot up (getMe, deleteWebhook) and restarts the poller. */
+static void run_token(tgapi_conn_t *conn, send_req_t *r)
+{
+    r->st = tgapi_check_token(conn, r->text, r->bot, sizeof(r->bot), &r->err);
+    if (r->st == TG_OK) {
+        portENTER_CRITICAL(&s_req_mux);
+        bool gone = r->abandoned;       /* the console already answered timeout */
+        portEXIT_CRITICAL(&s_req_mux);
+        if (!gone) {
+            xSemaphoreTake(s_bind, portMAX_DELAY);
+            r->stored = cfg_set_tg_token(r->text) == ESP_OK;
+            xSemaphoreGive(s_bind);
+        }
+    } else {
+        ESP_LOGW(TAG, "token not stored: %s (code %d)", tg_status_name(r->st), r->err.error_code);
+    }
+    finish_send(r);
+}
+
 static void run_req(tgapi_conn_t *conn, send_req_t *r)
 {
-    if (r->kind == REQ_SEND) {
+    if (r->done != NULL) {
         portENTER_CRITICAL(&s_req_mux);
         bool gone = r->abandoned;
         portEXIT_CRITICAL(&s_req_mux);
@@ -299,26 +421,33 @@ static void run_req(tgapi_conn_t *conn, send_req_t *r)
             return;
         }
     }
+    if (r->kind == REQ_TOKEN) {
+        run_token(conn, r);
+        return;
+    }
+    if (r->kind != REQ_SEND) {
+        tg_status_t st = deliver_plain(conn, r->kind == REQ_HINT ? PLAIN_HINT : PLAIN_CONFIRM,
+                                       r->chat, r->text, r->reply_to, &r->err);
+        if (r->kind == REQ_HINT) {
+            atomic_fetch_add(st == TG_OK ? &s_hints_sent : &s_hints_dropped, 1);
+        }
+        if (st != TG_OK) {
+            ESP_LOGW(TAG, "%s not sent: %s", r->kind == REQ_HINT ? "hint" : "pairing confirmation",
+                     tg_status_name(st));
+        }
+        free_req(r);
+        return;
+    }
     int64_t now = esp_timer_get_time();
     if (now < s_blocked_until_us) {
         r->st = TG_ERR_RETRY;
         r->err.retry_after_s = (uint32_t)((s_blocked_until_us - now + 999999) / 1000000);
-    } else if (r->kind == REQ_HINT && !wifi_up()) {
-        r->st = TG_ERR_NET;
     } else {
-        r->st = tgapi_send_message(conn, r->chat, r->kind == REQ_SEND ? r->actor : NULL,
-                                   r->text, r->reply_to, &r->msg_id, &r->err);
+        r->st = tgapi_send_message(conn, r->chat, r->actor, r->text, r->reply_to, &r->msg_id,
+                                   &r->err);
         if (r->st == TG_ERR_RETRY) {
             s_blocked_until_us = esp_timer_get_time() + (int64_t)r->err.retry_after_s * 1000000;
         }
-    }
-    if (r->kind == REQ_HINT) {
-        atomic_fetch_add(r->st == TG_OK ? &s_hints_sent : &s_hints_dropped, 1);
-        if (r->st != TG_OK) {
-            ESP_LOGW(TAG, "hint not sent: %s", tg_status_name(r->st));
-        }
-        free_req(r);
-        return;
     }
     if (r->st == TG_OK) {
         /* Also when the console has already answered timeout: the message exists, so a
@@ -326,6 +455,25 @@ static void run_req(tgapi_conn_t *conn, send_req_t *r)
         add_pending(r->msg_id, r->actor);
     }
     finish_send(r);
+}
+
+/* Wait for tg_send to finish a waited request, at most CONFIG_EMBPET_TG_SEND_TIMEOUT_MS.
+ * False on timeout: the request is then abandoned and tg_send frees it, so the caller must
+ * not touch it any more. */
+static bool await_done(send_req_t *r)
+{
+    if (xSemaphoreTake(r->done, pdMS_TO_TICKS(CONFIG_EMBPET_TG_SEND_TIMEOUT_MS)) == pdTRUE) {
+        return true;
+    }
+    portENTER_CRITICAL(&s_req_mux);
+    bool finished = r->finished;
+    r->abandoned = !finished;
+    portEXIT_CRITICAL(&s_req_mux);
+    if (!finished) {
+        return false;
+    }
+    xSemaphoreTake(r->done, portMAX_DELAY);     /* given right after finished was set */
+    return true;
 }
 
 const char *bridge_send(const char *actor, const char *text, int64_t reply_to,
@@ -390,17 +538,10 @@ const char *bridge_send(const char *actor, const char *text, int64_t reply_to,
         return CONSOLE_ERR_BUSY;
     }
 
-    if (xSemaphoreTake(r->done, pdMS_TO_TICKS(CONFIG_EMBPET_TG_SEND_TIMEOUT_MS)) != pdTRUE) {
-        portENTER_CRITICAL(&s_req_mux);
-        bool finished = r->finished;
-        r->abandoned = !finished;
-        portEXIT_CRITICAL(&s_req_mux);
-        if (!finished) {
-            snprintf(msg, cap, "no answer from Telegram within %d ms",
-                     CONFIG_EMBPET_TG_SEND_TIMEOUT_MS);
-            return CONSOLE_ERR_TIMEOUT;
-        }
-        xSemaphoreTake(r->done, portMAX_DELAY);     /* given right after finished was set */
+    if (!await_done(r)) {
+        snprintf(msg, cap, "no answer from Telegram within %d ms",
+                 CONFIG_EMBPET_TG_SEND_TIMEOUT_MS);
+        return CONSOLE_ERR_TIMEOUT;
     }
 
     const char *code = NULL;
@@ -418,6 +559,134 @@ const char *bridge_send(const char *actor, const char *text, int64_t reply_to,
     }
     free_req(r);
     return code;
+}
+
+const char *bridge_set_token(const char *token, char *bot, size_t bot_cap, char *msg,
+                             size_t cap)
+{
+    msg[0] = '\0';
+    if (!cfg_token_valid(token)) {
+        snprintf(msg, cap, "not a bot token (<digits>:<secret>)");
+        return CONSOLE_ERR_BAD_ARGS;
+    }
+    if (!wifi_up()) {
+        snprintf(msg, cap, "wifi down: the token is checked with Telegram before it is stored");
+        return CONSOLE_ERR_OFFLINE;
+    }
+    size_t n = strlen(token);
+    send_req_t *r = calloc(1, sizeof(*r) + n + 1);
+    if (r != NULL) {
+        r->done = xSemaphoreCreateBinary();
+    }
+    if (r == NULL || r->done == NULL) {
+        if (r != NULL) {
+            free_req(r);
+        }
+        snprintf(msg, cap, "out of memory");
+        return CONSOLE_ERR_INTERNAL;
+    }
+    r->kind = REQ_TOKEN;
+    memcpy(r->text, token, n + 1);
+    if (xQueueSendToFront(s_queue, &r, 0) != pdTRUE) {
+        free_req(r);
+        snprintf(msg, cap, "send queue full");
+        return CONSOLE_ERR_BUSY;
+    }
+    if (!await_done(r)) {
+        snprintf(msg, cap, "no answer from Telegram within %d ms (the token may still be "
+                 "stored: check tg status)", CONFIG_EMBPET_TG_SEND_TIMEOUT_MS);
+        return CONSOLE_ERR_TIMEOUT;
+    }
+
+    const char *code = NULL;
+    if (r->st != TG_OK) {
+        code = bridge_send_err(r->st, r->err.error_code, r->err.description);
+        if (r->st == TG_ERR_AUTH) {
+            snprintf(msg, cap, "token rejected by Telegram (%d), not stored", r->err.error_code);
+        } else {
+            snprintf(msg, cap, "telegram: %s, token not stored", tg_status_name(r->st));
+        }
+    } else if (!r->stored) {
+        code = CONSOLE_ERR_INTERNAL;
+        snprintf(msg, cap, "could not store the token");
+    } else {
+        snprintf(bot, bot_cap, "%s", r->bot);
+    }
+    free_req(r);
+    return code;
+}
+
+const char *bridge_pair_start(char *code, uint32_t *expires_s, char *msg, size_t cap)
+{
+    msg[0] = '\0';
+    state_snapshot_t s;
+    state_get(&s);
+    if (s.tg.state == STATE_TG_UNCONFIGURED) {
+        snprintf(msg, cap, "no bot token");
+        return CONSOLE_ERR_NOT_CONFIGURED;
+    }
+    uint32_t ttl = PAIR_TTL_S;
+#ifdef CONFIG_EMBPET_TG_TEST
+    ttl = atomic_load(&s_pair_ttl_s);
+#endif
+    uint32_t rnd;
+    do {
+        esp_fill_random(&rnd, sizeof(rnd));
+    } while (!pair_code_make(rnd, code));
+    xSemaphoreTake(s_bind, portMAX_DELAY);
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    pair_start(&s_pair, code, uptime_ms(), ttl);
+    xSemaphoreGive(s_lock);
+    xSemaphoreGive(s_bind);
+    mbedtls_platform_zeroize(&rnd, sizeof(rnd));
+    *expires_s = ttl;
+    return NULL;
+}
+
+/* ------------------------------------------------------------ online notice */
+
+typedef struct {
+    bool done;                          /* sent, given up, or not wanted this boot */
+    unsigned tries;
+    int64_t next_us;
+} notice_t;
+
+/* Once per boot, from the first moment Telegram is online: with an owner set, post the
+ * notice (a few attempts for transient failures); with none, there is no notice this boot.
+ * Later reconnects never come back here. True if it used the connection. */
+static bool notice_step(tgapi_conn_t *conn, notice_t *n, const state_snapshot_t *s)
+{
+    if (n->done || s->wifi.state != STATE_WIFI_UP || s->tg.state != STATE_TG_ONLINE) {
+        return false;
+    }
+    int64_t owner = cfg_get_tg_owner();
+    if (owner == 0) {
+        n->done = true;
+        return false;
+    }
+    int64_t now = esp_timer_get_time();
+    if (now < n->next_us) {
+        return false;
+    }
+    char text[96];
+    notice_format(text, sizeof(text), esp_app_get_description()->version, proto_reset_reason());
+    tg_resp_t err;
+    tg_status_t st = deliver_plain(conn, PLAIN_NOTICE, owner, text, 0, &err);
+    if (st == TG_OK) {
+        n->done = true;
+        return true;
+    }
+    bool transient = st == TG_ERR_NET || st == TG_ERR_TIMEOUT || st == TG_ERR_SERVER ||
+                     st == TG_ERR_RETRY;
+    if (!transient || ++n->tries >= NOTICE_MAX_TRIES) {
+        ESP_LOGW(TAG, "online notice not sent: %s", tg_status_name(st));
+        n->done = true;
+        return true;
+    }
+    uint32_t delay = tg_retry_delay_ms(st, err.retry_after_s, n->tries - 1);
+    n->next_us = esp_timer_get_time() +
+                 (int64_t)(delay > NOTICE_RETRY_MIN_MS ? delay : NOTICE_RETRY_MIN_MS) * 1000;
+    return true;
 }
 
 /* ------------------------------------------------------------ tg_send task */
@@ -461,6 +730,7 @@ static void send_task(void *arg)
     unsigned streak = 0;
     int64_t next_setup_us = 0;
     bool open = false;                  /* a session may be open */
+    notice_t notice = {0};
     for (;;) {
         uint32_t gen = atomic_load(&s_tok_gen);
         if (gen != seen_gen) {          /* new token: set up again at once */
@@ -495,6 +765,9 @@ static void send_task(void *arg)
                 wait = pdMS_TO_TICKS(left_ms);
             }
         }
+        if (notice_step(conn, &notice, &s)) {
+            open = true;
+        }
         send_req_t *r;
         if (xQueueReceive(s_queue, &r, wait) == pdTRUE) {
             open = true;
@@ -505,10 +778,90 @@ static void send_task(void *arg)
 
 /* ------------------------------------------------------------ tg_poll task */
 
+/* Pairing comes before routing: with no owner every update would be ignored. A message of
+ * any chat that is `/start <code>` while pairing is active is judged here; *consumed is set
+ * unless the update is to be routed as usual. False if the owner could not be stored: the
+ * caller does not advance the offset, so the update (still a valid code until it expires)
+ * is fetched again. Neither the code nor the chat is logged. */
+static bool try_pair_locked(const cJSON *u, const char *bot, bool *consumed)
+{
+    *consumed = false;
+    int64_t chat;
+    const char *text;
+    if (!owner_update_text(u, &chat, &text)) {
+        return true;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    pair_result_t res = pair_check(&s_pair, text, bot, uptime_ms());
+    xSemaphoreGive(s_lock);
+    switch (res) {
+    case PAIR_PASS:
+        return true;
+    case PAIR_WRONG:
+        ESP_LOGW(TAG, "pairing: wrong code ignored");
+        *consumed = true;
+        return true;
+    case PAIR_LOCKED:
+        ESP_LOGW(TAG, "pairing cancelled after %d wrong codes, run tg pair again",
+                 PAIR_MAX_WRONG);
+        *consumed = true;
+        return true;
+    case PAIR_MATCH:
+        break;
+    }
+    /* The cfg callback (on_cfg) ends the pairing. */
+    esp_err_t err = cfg_set_tg_owner(chat);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "pairing: storing the owner failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    *consumed = true;
+    cJSON *f = cJSON_CreateObject();
+    if (f == NULL || cJSON_AddNumberToObject(f, "chat_id", (double)chat) == NULL) {
+        cJSON_Delete(f);
+        ESP_LOGW(TAG, "paired event lost (out of memory)");
+    } else if (proto_evt("paired", f) == 0) {
+        ESP_LOGW(TAG, "paired event lost (out of memory)");
+    }
+    /* Best effort, one try: the `paired` event is what hosts rely on. */
+    if (!queue_plain(REQ_CONFIRM, chat, 0, PAIR_CONFIRM_TEXT, true)) {
+        ESP_LOGW(TAG, "pairing confirmation dropped: send queue full or out of memory");
+    }
+    return true;
+}
+
+/* s_bind makes judging the code and storing the owner one step with respect to everything
+ * else that ends or replaces a pairing or writes the owner (`tg owner`, `tg pair`, the
+ * token store), so a right code cannot bind an owner after the pairing was cancelled. */
+static bool try_pair(const cJSON *u, bool *consumed)
+{
+    state_snapshot_t s;
+    state_get(&s);
+    xSemaphoreTake(s_bind, portMAX_DELAY);
+    bool ok = try_pair_locked(u, s.tg.bot, consumed);
+    xSemaphoreGive(s_bind);
+    return ok;
+}
+
+esp_err_t bridge_owner_write(int64_t chat)
+{
+    xSemaphoreTake(s_bind, portMAX_DELAY);
+    esp_err_t err = chat == 0 ? cfg_clear_tg_owner() : cfg_set_tg_owner(chat);
+    xSemaphoreGive(s_bind);
+    return err;
+}
+
 /* Route one update. False if its event could not be recorded: the caller does not advance
  * the offset, so the update is fetched again. */
 static bool handle_update(const cJSON *u)
 {
+    bool consumed;
+    if (!try_pair(u, &consumed)) {
+        return false;
+    }
+    if (consumed) {
+        return true;
+    }
     int64_t owner = cfg_get_tg_owner();
     bridge_route_t rt;
     xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -656,15 +1009,17 @@ static void poll_task(void *arg)
 esp_err_t tgbot_start(void)
 {
     s_lock = xSemaphoreCreateMutex();
+    s_bind = xSemaphoreCreateMutex();
     s_emit_lock = xSemaphoreCreateMutex();
     s_queue = xQueueCreate(QUEUE_LEN, sizeof(send_req_t *));
     tgapi_conn_t *poll = tgapi_conn_create(TGAPI_CONN_POLL);
     tgapi_conn_t *send = tgapi_conn_create(TGAPI_CONN_SEND);
-    if (s_lock == NULL || s_emit_lock == NULL || s_queue == NULL || poll == NULL ||
+    if (s_lock == NULL || s_bind == NULL || s_emit_lock == NULL || s_queue == NULL || poll == NULL ||
         send == NULL) {
         return ESP_ERR_NO_MEM;
     }
     pending_init(&s_table);
+    pair_init(&s_pair);
     load_bot_id();
     if (xTaskCreate(poll_task, "tg_poll", TASK_STACK, poll, TASK_PRIO, &s_poll_task) != pdPASS ||
         xTaskCreate(send_task, "tg_send", TASK_STACK, send, TASK_PRIO, NULL) != pdPASS) {
@@ -703,6 +1058,30 @@ void bridge_test_counters(bridge_test_counters_t *c)
     c->hints_dropped = atomic_load(&s_hints_dropped);
     c->polls = atomic_load(&s_polls);
     c->probes = atomic_load(&s_probes);
+}
+
+void bridge_test_pair_ttl(uint32_t ttl_s)
+{
+    atomic_store(&s_pair_ttl_s, ttl_s);
+}
+
+void bridge_test_live(bool on)
+{
+    atomic_store(&s_capture, !on);
+}
+
+void bridge_test_notice(bridge_test_notice_t *n)
+{
+    n->live = !atomic_load(&s_capture);
+    n->notices = atomic_load(&s_notice_n);
+    n->confirms = atomic_load(&s_confirm_n);
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    n->pair_left_s = pair_left_s(&s_pair, uptime_ms());
+    xSemaphoreGive(s_lock);
+    portENTER_CRITICAL(&s_req_mux);
+    memcpy(n->notice_text, s_notice_text, sizeof(n->notice_text));
+    memcpy(n->confirm_text, s_confirm_text, sizeof(n->confirm_text));
+    portEXIT_CRITICAL(&s_req_mux);
 }
 
 void bridge_test_fault(bool on)

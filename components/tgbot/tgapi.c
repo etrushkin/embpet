@@ -194,7 +194,7 @@ void tgapi_conn_close(tgapi_conn_t *c)
 
 /* Point the connection at bot<token>/<method>. The host never changes, so a kept-alive
  * session stays usable. Local copies of the token are wiped. */
-static tg_status_t set_url(tgapi_conn_t *c, const char *method)
+static tg_status_t set_url(tgapi_conn_t *c, const char *method, const char *token)
 {
     if (method == NULL || strlen(method) >= METHOD_MAX) {
         return TG_ERR_BAD_ARG;
@@ -202,9 +202,18 @@ static tg_status_t set_url(tgapi_conn_t *c, const char *method)
     char tok[CFG_TOKEN_MAX + 1];
     char url[URL_SIZE];
     tg_status_t st = TG_ERR_NO_TOKEN;
+    if (token == NULL) {
+        if (cfg_get_tg_token(tok, sizeof(tok)) != ESP_OK) {
+            tok[0] = '\0';
+        }
+    } else if (strlen(token) <= CFG_TOKEN_MAX) {
+        strcpy(tok, token);             /* a candidate token, not stored yet */
+    } else {
+        tok[0] = '\0';
+    }
     /* A valid token is [0-9]+:[A-Za-z0-9_-]+, so the URL always parses and
      * esp_http_client_set_url never logs it in its parse-error message. */
-    if (cfg_get_tg_token(tok, sizeof(tok)) == ESP_OK && cfg_token_valid(tok)) {
+    if (cfg_token_valid(tok)) {
         snprintf(url, sizeof(url), API_BOT_URL "%s/%s", tok, method);
         esp_err_t err = esp_http_client_set_url(c->h, url);
         st = err == ESP_OK ? TG_OK : err == ESP_ERR_NO_MEM ? TG_ERR_NO_MEM : TG_ERR_BAD_ARG;
@@ -316,14 +325,15 @@ static tg_status_t request(tgapi_conn_t *c, const char *body, size_t max_len, tg
 
 /* Run one call without touching the tg state. *gen is the token generation it ran with. */
 static tg_status_t call_raw(tgapi_conn_t *c, const char *method, const char *body,
-                            size_t max_len, tg_resp_t *out, uint32_t *gen, esp_err_t *net_err)
+                            size_t max_len, tg_resp_t *out, uint32_t *gen, esp_err_t *net_err,
+                            const char *token)
 {
     memset(out, 0, sizeof(*out));
     *net_err = ESP_OK;
     xSemaphoreTake(s_lock, portMAX_DELAY);
     *gen = s_token_gen;                 /* before the token is read: a change makes it stale */
     xSemaphoreGive(s_lock);
-    tg_status_t st = set_url(c, method);
+    tg_status_t st = set_url(c, method, token);
     if (st == TG_OK) {
         st = request(c, body != NULL ? body : "{}", max_len, out, net_err);
     }
@@ -400,7 +410,7 @@ static tg_status_t call(tgapi_conn_t *c, const char *method, const char *body, s
 {
     uint32_t gen;
     esp_err_t net_err;
-    tg_status_t st = call_raw(c, method, body, max_len, out, &gen, &net_err);
+    tg_status_t st = call_raw(c, method, body, max_len, out, &gen, &net_err, NULL);
     finish(method, st, gen, out, net_err);
     return st;
 }
@@ -424,7 +434,7 @@ tg_status_t tgapi_get_me(tgapi_conn_t *c, char *bot, size_t cap, tg_resp_t *err)
     tg_resp_t r;
     uint32_t gen;
     esp_err_t net_err;
-    tg_status_t st = call_raw(c, "getMe", NULL, TG_RESP_MAX, &r, &gen, &net_err);
+    tg_status_t st = call_raw(c, "getMe", NULL, TG_RESP_MAX, &r, &gen, &net_err, NULL);
     if (st == TG_OK) {
         char name[STATE_BOT_LEN];
         if (tg_parse_bot_username(r.result, name, sizeof(name)) && strlen(name) < cap) {
@@ -440,6 +450,32 @@ tg_status_t tgapi_get_me(tgapi_conn_t *c, char *bot, size_t cap, tg_resp_t *err)
         }
     }
     finish("getMe", st, gen, &r, net_err);
+    give_err(&r, err);
+    return st;
+}
+
+tg_status_t tgapi_check_token(tgapi_conn_t *c, const char *token, char *bot, size_t cap,
+                              tg_resp_t *err)
+{
+    tg_resp_t r;
+    uint32_t gen;
+    esp_err_t net_err;
+    tg_status_t st = call_raw(c, "getMe", NULL, TG_RESP_MAX, &r, &gen, &net_err, token);
+    if (st == TG_OK) {
+        char name[STATE_BOT_LEN];
+        if (tg_parse_bot_username(r.result, name, sizeof(name)) && strlen(name) < cap) {
+            strcpy(bot, name);
+        } else {
+            st = TG_ERR_SERVER;
+        }
+    }
+    /* The token is not the stored one: the answer says nothing about the tg state. Drop the
+     * session, and overwrite the URL path, which esp_http_client_close keeps, with the
+     * stored token's (a candidate must not linger in the handle). */
+    tgapi_conn_close(c);
+    if (set_url(c, "getMe", NULL) != TG_OK) {
+        esp_http_client_set_url(c->h, API_HOST_URL);    /* no stored token: no token path */
+    }
     give_err(&r, err);
     return st;
 }

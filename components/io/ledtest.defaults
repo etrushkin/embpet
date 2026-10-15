@@ -1,0 +1,5 @@
+# Test build for tools/led_test.py: LED pin readback and edge recorder, plus the bridge test
+# commands (tg t_pend, tg t_token). Never flash this to a deployed board.
+#   scripts/idf.sh idf.py -B build-m5o-test -D SDKCONFIG=build-m5o-test/sdkconfig \
+#       -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;components/tgbot/bridgetest.defaults;components/io/ledtest.defaults" build
+CONFIG_EMBPET_LED_TEST=y

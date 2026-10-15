@@ -1,6 +1,9 @@
-set(srcs "pulse_core.c" "debounce_core.c" "io_out.c" "io_in.c" "io_cmd.c")
+set(srcs "pulse_core.c" "debounce_core.c" "io_out.c" "io_in.c" "io_cmd.c" "led_core.c" "led.c")
 if(CONFIG_EMBPET_IO_TEST)
     list(APPEND srcs "io_test.c")
+endif()
+if(CONFIG_EMBPET_LED_TEST)
+    list(APPEND srcs "led_test.c")
 endif()
 
 idf_component_register(SRCS ${srcs}
