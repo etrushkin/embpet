@@ -18,6 +18,9 @@ const char *proto_boot_id(void);
 /* Emit the `boot` event {fw, idf, reset_reason} (README 3.3). Call once after proto_init. */
 uint32_t proto_emit_boot(void);
 
+/* Reset reason of this boot as a short string ("poweron", "software", "panic", "usb", ...). */
+const char *proto_reset_reason(void);
+
 /* All emitters are callable from any task context, including the esp_timer task. Each
  * assigns the next seq (shared by res and evt, starting at 1), renders the frame and
  * writes "\n@@{json}\n" with a single fwrite under a mutex, which also holds off ESP_LOG
@@ -45,9 +48,8 @@ uint32_t proto_evt(const char *ev, cJSON *fields);
 
 /* `evt since <seq>`: re-emit, verbatim and with their original seq, every ring event with
  * seq > since. Returns how many were replayed (or would have been, if the host is not
- * connected). *truncated is set if matching events had already left the ring; the console
- * command then answers with proto_res(ctx, {"truncated":true}) when set. The console
- * command itself lives in the console bead. */
+ * connected). *truncated is set if matching events had already left the ring. The console
+ * command `evt since` (main/cmd_sys.c) answers with {"count":n,"truncated":bool}. */
 size_t proto_evt_replay(uint32_t since, bool *truncated);
 
 #endif /* EMBPET_PROTO_H */

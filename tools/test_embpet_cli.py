@@ -1,12 +1,76 @@
 #!/usr/bin/env python3
-"""Offline test of FrameChecker (embpet_cli.py --check-frames). No board needed.
+"""Offline tests of embpet_cli.py: FrameChecker (--check-frames) and the DTR/RTS order of
+open_port. No board needed.
 Run: scripts/idf.sh python tools/test_embpet_cli.py"""
 import os
 import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from embpet_cli import FrameChecker  # noqa: E402
+from embpet_cli import FrameChecker, open_port  # noqa: E402
+from serial.serialutil import SerialBase  # noqa: E402
+
+
+class FakePosixSerial(SerialBase):
+    """Models the modem-line handling of pyserial's serialposix.Serial.open() on macOS:
+    the OS asserts DTR and RTS when the port opens, then open() applies DTR (unless
+    dsrdtr) and then RTS (unless rtscts). Setting dtr/rts on an open port applies it at
+    once. Records every (dtr, rts) state the device sees."""
+
+    def open(self):
+        self.lines = [(1, 1)]
+        self.is_open = True
+        if not self._dsrdtr:
+            self._update_dtr_state()
+        if not self._rtscts:
+            self._update_rts_state()
+
+    def close(self):
+        self.is_open = False
+
+    def _reconfigure_port(self, force_update=False):
+        pass
+
+    def _set(self, dtr=None, rts=None):
+        d, r = self.lines[-1]
+        self.lines.append((d if dtr is None else int(dtr), r if rts is None else int(rts)))
+
+    def _update_dtr_state(self):
+        self._set(dtr=self._dtr_state)
+
+    def _update_rts_state(self):
+        self._set(rts=self._rts_state)
+
+
+class OpenPortTest(unittest.TestCase):
+    def test_plain_pyserial_order_resets(self):
+        # The bug (embpet-s2j.1): dtr=rts=False before open() passes through (0,1).
+        s = FakePosixSerial()
+        s.dtr = False
+        s.rts = False
+        s.open()
+        self.assertIn((0, 1), s.lines)
+
+    def test_open_port_never_presents_reset_state(self):
+        s = open_port("/dev/null", serial_cls=FakePosixSerial)
+        self.assertNotIn((0, 1), s.lines)           # RTS=1 with DTR=0 resets the chip
+        self.assertEqual(s.lines[-1], (0, 0))
+        self.assertFalse(s.dsrdtr)
+
+    def test_open_port_closes_on_line_setup_error(self):
+        class Failing(FakePosixSerial):
+            def _update_dtr_state(self):
+                raise OSError(5, "ioctl failed")
+
+        made = []
+
+        def factory():
+            made.append(Failing())
+            return made[-1]
+
+        with self.assertRaises(OSError):
+            open_port("/dev/null", serial_cls=factory)
+        self.assertFalse(made[0].is_open)
 
 
 def frame(seq, boot="aaaa0001"):

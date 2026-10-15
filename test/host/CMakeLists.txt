@@ -41,10 +41,15 @@ enable_testing()
 # Single source of truth for the warning set (defines EMBPET_WARNING_FLAGS; no IDF commands run).
 include(${EMBPET_ROOT}/cmake/embpet_warnings.cmake)
 
-# ASan + UBSan on every target (compile and link). UB aborts the test instead of printing and
+# ASan + UBSan on every target (compile and link) when EMBPET_HOST_SANITIZE is ON (default). UB aborts the test instead of printing and
 # continuing. LeakSanitizer is unsupported on macOS ARM; ASan simply omits leak checking there.
-set(EMBPET_SANITIZE_FLAGS -fsanitize=address,undefined -fno-sanitize-recover=undefined
-                          -fno-omit-frame-pointer)
+option(EMBPET_HOST_SANITIZE "Build host tests with ASan+UBSan" ON)
+if(EMBPET_HOST_SANITIZE)
+    set(EMBPET_SANITIZE_FLAGS -fsanitize=address,undefined -fno-sanitize-recover=undefined
+                              -fno-omit-frame-pointer)
+else()
+    set(EMBPET_SANITIZE_FLAGS "")
+endif()
 
 # Third-party code is built without -Werror; project code and tests with it.
 add_library(unity STATIC "${UNITY_DIR}/unity.c")
@@ -98,6 +103,11 @@ embpet_add_host_test(
     NAME     cfg
     SOURCES  cfg/test_cfg.c ${EMBPET_ROOT}/components/netcfg/cfg_core.c
     INCLUDES ${EMBPET_ROOT}/components/netcfg/include)
+
+embpet_add_host_test(
+    NAME     escape
+    SOURCES  escape/test_escape.c ${EMBPET_ROOT}/components/proto/escape_core.c
+    INCLUDES ${EMBPET_ROOT}/components/proto/include)
 
 embpet_add_host_test(
     NAME     proto

@@ -144,20 +144,21 @@ Wi-Fi SSID and password, Wi-Fi TX power, bot token, owner `chat_id`, per-pin boo
 ## 3. Serial protocol
 
 ### 3.1 Transport
-- USB-Serial/JTAG CDC port; the baud rate is irrelevant. It uses the `esp_console` REPL (linenoise) with prompt `embpet> `, and the maximum command line is **4400 bytes**.
+- USB-Serial/JTAG CDC port; the baud rate is irrelevant. The firmware runs its own small REPL with prompt `embpet> `, and the maximum command line is **4400 bytes** (a longer line is answered with `err:"too_long"`). It works like linenoise's "dumb" mode: no escape sequences, the input is echoed, BS/DEL erases one character, and control bytes other than TAB are ignored. A line ends with CR, LF or CRLF; blank lines get no response. `esp_console`'s REPL is not used because in IDF 5.5.2 linenoise strips every byte that isn't `isprint()` (all UTF-8 bytes), `esp_console_split_argv` drops unknown escapes such as `\n` together with their character, and it answers unknown commands with plain text rather than a frame. Options are still parsed with argtable3.
 - **Port-open reset (verified on macOS, pyserial 3.x; run counts per case below):** opening the port can reset the C3 or hold it in reset, depending on the DTR/RTS order.
   - Default pyserial open (DTR and RTS asserted): the chip stays **silent for as long as the port is open**, presumably because RTS holds EN low. 5/5 runs.
   - `dtr = rts = False` set *before* `open()` still **resets the chip on every open** (`rst:0x15 USB_UART_CHIP_RESET`, uptime restarts at 0): 5/5 runs, and 4 further opens in the closed-port runs. macOS asserts both lines on `open()`, and pyserial then clears DTR first and RTS second, so the chip sees (DTR,RTS) = (1,1), (0,1), (0,0); the likely cause is the (0,1) step.
   - **No reset:** clear **RTS first**, then DTR (skip pyserial's DTR update in `open()`, then clear RTS, then DTR). In about 15 such opens (including 10 s closed periods) the chip kept the same boot, with continuous uptime.
   - The first open after any chip reset (flash, reset) delivered its first byte only after about 2.5 s; later opens deliver within 0.1 s.
-  - A host program must therefore use the RTS-first order, or accept one reset per command.
+  - A host program must therefore use the RTS-first order, or accept one reset per command. `tools/embpet_cli.py` does: it opens with `dsrdtr=True`, so pyserial's `open()` clears only RTS, and then it clears DTR. That gives (1,1), (1,0), (0,0). In 10 consecutive CLI runs the chip kept the same boot and its uptime kept rising, and `--reset` still resets it.
 - **Log sink: USB-Serial/JTAG is the primary and only console**, for both the 2nd-stage bootloader and the app (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`, `CONFIG_ESP_CONSOLE_SECONDARY_NONE=y`). UART0 is never initialised as a console, so GPIO20/21 are free for inputs. The 1st-stage ROM boot log still goes to UART0 (GPIO21) as well as USB. That's left as is: no eFuse changes.
 - **Port closed (verified, 10 s closed, 2 cycles, both console modes):** nothing blocks for long and nothing is replayed.
   - Output written while no program has the port open is **dropped**; after reopening, the stream continues at the current line (no backlog).
-  - The first write after the host stops reading stalls the writer for the TX timeout, **40–50 ms** (IDF `TX_FLUSH_TIMEOUT_US` = 50 ms), once per close. All later writes are fast: about 0.2 ms per 70-byte line without the USB-Serial/JTAG driver, about 0.7 ms with the driver installed (as `esp_console` does). Worst-case writer stall: **≈50 ms**. A same-priority task kept its 10 ms cadence during the stall (no heartbeat gap above 10 ms). A lower-priority task was not measured; on the single core it could in principle be delayed by up to the stall.
+  - The first write after the host stops reading stalls the writer for the TX timeout, **40–50 ms** (IDF `TX_FLUSH_TIMEOUT_US` = 50 ms), once per close. All later writes are fast: about 0.2 ms per 70-byte line without the USB-Serial/JTAG driver, about 0.7 ms with the driver installed (as the embpet console does). Worst-case writer stall: **≈50 ms**. A same-priority task kept its 10 ms cadence during the stall (no heartbeat gap above 10 ms). A lower-priority task was not measured; on the single core it could in principle be delayed by up to the stall.
   - `usb_serial_jtag_is_connected()` follows USB start-of-frame packets, not the open state of the port: it stayed **true while the port was closed** (the cable stays enumerated), and was false on only 1 of about 7000 writes (a transient at reconnect). Do not use it to detect a listening host; it only skips writes while the cable is unplugged (the VFS write then returns -1 at once).
   - Design consequence: a single `fwrite` under the output lock holds the lock for at most about 50 ms per host stall.
-- The console also carries ESP-IDF log lines, the echoed input and the prompt. **Hosts must ignore every line that does not start with `@@`.** The console log level defaults to `WARN` and can be changed with `sys log`.
+- The console also carries ESP-IDF log lines, the echoed input and the prompt. **Hosts must ignore every line that does not start with `@@`.** The console log level is `WARN` once init is done and can be changed with `sys log`.
+- **Log lines never wait for the host:** the log sink drops whole lines while the cable is unplugged or the driver's 2 KB TX buffer is full (the host stopped reading), and counts them (`sys info` → `log_dropped`). Frames are written normally. The output that fills the buffer can still pay the one 40–50 ms stall above. Measured with a soak build (an event and a log line every 100 ms, port closed for 10 min): longest event write 51 ms, longest log write 49 ms, the generator's 100 ms loop never late, and `evt since` worked after reopening.
 
 ### 3.2 Host → FW: plain commands
 
@@ -168,7 +169,13 @@ Every command is a normal console line. Two options are accepted on **every** co
 | `-a <actor>` | Actor ID, `[A-Za-z0-9_-]{1,16}`. **Required** for `tg send`; optional elsewhere. |
 | `-i <rid>` | Request ID chosen by the host, `[A-Za-z0-9_-]{1,32}`, for matching responses. |
 
-Text arguments are double-quoted. Inside quotes, `\"`, `\\` and `\n` are escapes, and UTF-8 passes through as-is.
+Text arguments are double-quoted. Inside quotes, `\"`, `\\` and `\n` are escapes, and UTF-8 passes through as-is. Any other escape, a missing closing quote, a backslash at the end of the line, or text glued to a closing quote is rejected with `err:"bad_args"`. Outside quotes, backslashes and quotes are ordinary characters. Arguments are separated by spaces or tabs; inside quotes a tab is ordinary text. A text argument that starts with `-` must come after `--`, or it is taken as an option.
+
+`-a` and `-i` are echoed back even when the command fails, as long as their values are valid. That covers an unknown command, a bad option or a bad escape. A response to an invalid `-i` value has no `rid`. When quoting fails or the line is too long, only the options **before** the faulty spot are seen, so put `-a` and `-i` right after the command words.
+
+Host rules:
+- Match each response to its command by `rid`, not by position. Echoed input, log lines and event frames can be interleaved with responses.
+- Send the next command only after the previous command's `res`, or keep at most about 4 KB of input outstanding. While a command runs (e.g. `tg send`, up to 10 s), input waits in a receive buffer of 4400 + 256 bytes. Bytes beyond that are lost without notice.
 
 Plain commands for everything, including `tg send`, mean the firmware needs only one input parser (argtable3), and every command can still be typed by hand in a terminal.
 
@@ -184,6 +191,22 @@ Common fields: `t` (`res` | `evt`), `seq` (per-boot frame counter, starting at 1
 @@{"t":"res","seq":16,"boot":"9f3a11c2","cmd":"io set","rid":"8","ok":false,"err":"bad_pin","msg":"pin 9 is not an output"}
 ```
 `tg send` blocks until Telegram answers (timeout 10 s). It fails immediately with `err:"offline"` if Wi-Fi or Telegram is down.
+
+Error codes (`err`), with a human-readable `msg` alongside:
+
+| `err` | Meaning |
+|---|---|
+| `bad_args` | Unknown command, unknown or missing option or argument, invalid `-a`/`-i` value, bad quoting or escape, value out of range |
+| `bad_pin` | Pin number isn't valid for this operation (e.g. not an output) |
+| `too_long` | Command line over 4400 bytes, or text over its limit (4096 bytes for `tg send`) |
+| `offline` | Wi-Fi or Telegram is down |
+| `not_configured` | Required setting missing (Wi-Fi credentials, bot token, owner) |
+| `auth_error` | Telegram rejected the bot token |
+| `timeout` | No answer in time (e.g. Telegram within 10 s) |
+| `busy` | The operation can't run right now (e.g. another one is in progress) |
+| `internal` | Firmware error (out of memory, or a handler that sent no response) |
+
+The `cmd` of an unknown command echoes the typed command words (e.g. `"sys nope"`) when they are plain ASCII words; otherwise `cmd` is omitted.
 
 **Events** (`t:"evt"`). Asynchronous:
 
@@ -220,10 +243,11 @@ The last 32 events are kept in RAM. After a host reconnects it can replay them w
 | `io pulse <pin> [-d ms]` | Pulse-toggle an output (default 100 ms) | `pin`, `level`, `remaining_ms` |
 | `io get` | Output states | `out:[{pin,level,pulsing,remaining_ms}]` |
 | `io boot [<pin> on\|off]` | Per-pin boot level | `boot:{"0":"off",...}` |
-| `evt since <seq>` | Replay buffered events | events re-emitted, then `res` |
-| `sys info` | Versions, uptime, heap, MAC | … |
-| `sys log <level>` | Console log level | — |
-| `sys reboot` | Restart | `res`, then reboot |
+| `evt since <seq>` | Replay buffered events with seq > `<seq>` (`0` = all), verbatim with their original seq | events re-emitted, then `res` with `count` and `truncated` (true if some newer events had already left the buffer) |
+| `sys info` | Versions, uptime, heap, MAC | `fw`, `idf`, `uptime_s`, `heap_free`, `heap_min`, `mac`, `reset_reason`, `log` (level), `log_dropped` |
+| `sys log <none\|error\|warn\|info\|debug>` | Console log level (not stored; `warn` after each boot) | `level` |
+| `sys reboot` | Restart | `res`, then reboot after about 100 ms |
+| `help` | Print every command's syntax (plain text, for humans) | `cmds` (names) |
 
 ### 3.5 Example: two actors
 
@@ -298,7 +322,7 @@ The harness is a standalone CMake project in `test/host/` using Unity and cJSON 
 `$IDF_PATH/components`. To add a test, create `test/host/<name>/test_<name>.c` (Unity, own
 `main()`) and register it in `test/host/CMakeLists.txt` with `embpet_add_host_test(NAME ...
 SOURCES ... INCLUDES ... [WITH_CJSON])`. Host tests are built with `-Wall -Wextra -Werror`.
-They default to a Debug build with AddressSanitizer and UBSan (`-fsanitize=address,undefined`, UB is fatal); LeakSanitizer is unavailable on macOS ARM.
+They default to a Debug build with AddressSanitizer and UBSan (`-fsanitize=address,undefined`, UB is fatal); LeakSanitizer is unavailable on macOS ARM. On toolchains without the sanitizer runtimes, configure with `-DEMBPET_HOST_SANITIZE=OFF`.
 
 ---
 
@@ -315,6 +339,7 @@ partitions.csv        nvs, phy_init, factory (3 MB, no OTA)
 sdkconfig.defaults    build configuration (sdkconfig itself is generated)
 cmake/                embpet_warnings.cmake, the shared warning policy
 tools/embpet_cli.py   send one command, print the matching @@ response; --monitor SEC [--reset] dumps raw console output
+tools/console_test.py device tests of the console: functional, soak (port closed), reopen (no reset on open)
 scripts/bootstrap.sh  install a self-contained ESP-IDF into a given root
 scripts/export.sh     activate that ESP-IDF in the current shell (source it)
 skills/               agent skills (wifi-connect, …); symlinked into .claude/skills and .agents/skills (both git-ignored)

@@ -2,8 +2,7 @@
 #define EMBPET_PROTO_CORE_H
 /* Pure logic (no ESP-IDF includes): "@@" frame rendering and the event replay ring
  * (README 3.3). Uses only libc and cJSON. Not thread-safe: the caller (proto.c) holds a
- * lock around every call. The escape decoder and other pure cores of this component
- * join this layer later. */
+ * lock around every call. The console input core (escapes, -a/-i) is escape_core.h. */
 
 #include <stdbool.h>
 #include <stddef.h>

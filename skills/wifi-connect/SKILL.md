@@ -40,7 +40,7 @@ If the state is `"up"`, report the SSID, IP and RSSI. **Never print the password
 | `state` stays `down`, or associates then drops | Super Mini TX-power issue: `python tools/embpet_cli.py wifi txpower 8.5` (try 7–11). Keep wires away from the antenna end (GPIO20/21). |
 | Network not found | The C3 is 2.4 GHz only. Check that the SSID is a 2.4 GHz band and not hidden or 5 GHz-only. |
 | Auth failure | Re-check `.env.local`; WPA2/WPA3-Personal only, no enterprise or captive portal. |
-| Board resets when the port opens | Something opened the port with DTR/RTS asserted. Use `tools/embpet_cli.py`, which disables both before opening. |
+| Board resets when the port opens | Something opened the port with DTR/RTS asserted, or cleared DTR before RTS (README §3.1). Use `tools/embpet_cli.py`, which clears RTS first, then DTR. |
 | `timeout: no response` | Run with `--raw` to see console output; the board may be printing a boot loop or panic. |
 
 ## Notes

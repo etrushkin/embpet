@@ -4,7 +4,7 @@
 Usage:
   embpet_cli.py [-p PORT] [-t SEC] [-a ACTOR] [--show-events] [--raw] CMD [ARG ...]
 
-Each ARG is quoted and escaped for the esp_console parser, so values with
+Each ARG is quoted and escaped for the embpet console (README 3.2), so values with
 spaces or quotes are safe:  embpet_cli.py wifi set "my ssid" 'p"ss'
 
 Prints the response JSON on stdout. Exit codes: 0 = ok:true, 1 = ok:false,
@@ -51,20 +51,35 @@ def find_port():
 
 
 def quote(arg):
-    """Quote one argument for esp_console_split_argv; newlines become \\n."""
+    """Quote one argument for the embpet console (README 3.2); newlines become \\n."""
     esc = arg.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
     return '"%s"' % esc
 
 
-def open_port(port):
-    # Set DTR/RTS low *before* opening so the USB-Serial-JTAG does not reset.
-    s = serial.Serial()
+def open_port(port, serial_cls=None):
+    """Open the port without resetting the chip.
+
+    The USB-Serial-JTAG resets the chip while RTS=1 and DTR=0. macOS asserts both lines
+    when the port opens, and a plain pyserial open() then clears DTR before RTS, so the
+    chip sees (DTR,RTS) = (1,1) -> (0,1) -> (0,0) and resets at the middle step
+    (embpet-s2j.1). With dsrdtr=True, open() skips its DTR update (on POSIX dsrdtr has no
+    other effect) and clears only RTS; DTR is cleared afterwards:
+    (1,1) -> (1,0) -> (0,0). DTR=1/RTS=0 only selects the boot mode for a later reset.
+    """
+    s = (serial_cls or serial.Serial)()
     s.port = port
     s.baudrate = 115200
     s.timeout = 0.2
     s.dtr = False
     s.rts = False
+    s.dsrdtr = True
     s.open()
+    try:
+        s.dtr = False   # applied now that the port is open: RTS first, then DTR
+        s.dsrdtr = False
+    except BaseException:
+        s.close()
+        raise
     return s
 
 
@@ -260,11 +275,12 @@ def main():
                 text = raw.decode("utf-8", "replace").rstrip("\r")
                 if a.raw:
                     print(text, file=sys.stderr)
-                idx = text.find(FRAME + "{")
-                if idx < 0:
+                # Only lines that start with "@@{" are frames (README 3.3); the echoed
+                # command line or log text may contain "@@{" further in.
+                if not text.startswith(FRAME + "{"):
                     continue
                 try:
-                    frame = json.loads(text[idx + len(FRAME):])
+                    frame = json.loads(text[len(FRAME):])
                 except ValueError:
                     continue
                 if frame.get("t") == "evt":

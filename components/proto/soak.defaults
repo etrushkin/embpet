@@ -1,0 +1,3 @@
+# Extra sdkconfig defaults for the console soak build (embpet-86h):
+#   -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;components/proto/soak.defaults"
+CONFIG_EMBPET_CONSOLE_SOAK=y

@@ -72,9 +72,9 @@ const char *proto_boot_id(void)
     return s_boot;
 }
 
-static const char *reset_reason_str(esp_reset_reason_t r)
+const char *proto_reset_reason(void)
 {
-    switch (r) {
+    switch (esp_reset_reason()) {
     case ESP_RST_POWERON:   return "poweron";
     case ESP_RST_EXT:       return "external";
     case ESP_RST_SW:        return "software";
@@ -100,7 +100,7 @@ uint32_t proto_emit_boot(void)
     if (f != NULL) {
         cJSON_AddStringToObject(f, "fw", esp_app_get_description()->version);
         cJSON_AddStringToObject(f, "idf", esp_get_idf_version());
-        cJSON_AddStringToObject(f, "reset_reason", reset_reason_str(esp_reset_reason()));
+        cJSON_AddStringToObject(f, "reset_reason", proto_reset_reason());
     }
     return proto_evt("boot", f);
 }

@@ -8,4 +8,13 @@ menu "embpet proto"
             after boot. Check on the host with
             tools/embpet_cli.py --check-frames SEC --reset.
 
+    config EMBPET_CONSOLE_SOAK
+        bool "Console soak generator (never enable in production)"
+        default n
+        help
+            A task emits a "soak" event and a WARN log line every 100 ms and
+            reports the longest event write, log write and loop period it has
+            seen, so a host can show the firmware kept running while the port
+            was closed. Host side: tools/console_test.py soak.
+
 endmenu
