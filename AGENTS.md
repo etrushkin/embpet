@@ -55,7 +55,7 @@ Never install ESP-IDF into `~/.espressif` or `~/esp`. A new version gets its own
    - Push to `origin` after each commit (`git pull --rebase` first if the push is rejected).
    - **Never** force-push, rewrite published history, or run `git reset --hard`; these still need the user. Don't commit broken builds or work in progress to `main`.
    - An explicit "don't commit" or "don't push" from the user always wins.
-9. **Secrets:** `WIFI_SSID`, `WIFI_PASS` and `TG_TOKEN` exist only in the git-ignored `.env.local`. Load them with `set -a; . ./.env.local; set +a`. Never print them or copy them into code, skills, beads, logs or commits.
+9. **Secrets:** `WIFI_PASS` and `TG_TOKEN` are secrets. They exist only in the git-ignored `.env.local`, alongside `WIFI_SSID`. Never print the secrets or copy them into code, skills, beads, logs or commits. The SSID is not a secret: it may appear in `wifi status`, logs and notes, but it is still configured from `.env.local`, not hard-coded. Humans load the file with `set -a; . ./.env.local; set +a`; agents use the in-process helpers (`scripts/hw.sh python tools/wifi_from_env.py`), because sourcing always prompts.
 
 > **Architecture in one line:** Issues live in a local Dolt database
 > (`.beads/dolt/`); cross-machine sync uses `bd dolt push/pull` (a
