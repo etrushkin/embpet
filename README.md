@@ -97,11 +97,13 @@ ESP-IDF **v5.5.x**, plain C, no Arduino. The Telegram client is the project's ow
 - **Threading:** `tg send -a A -r <msg_id> "text"` sends the message as a Telegram reply to an earlier message, e.g. continuing a conversation with the owner.
 - **Incoming (routing):**
   1. If the owner uses **Reply** on a bot message, the firmware looks up the replied-to `message_id` in the pending table and emits a `reply` event for that actor.
-  2. If the message isn't in the table (after a reboot or eviction), the actor is recovered from the `[A]` prefix of the replied-to text, which Telegram includes in the update. The event then carries `"src":"prefix"`. Routing therefore survives reboots even though the table lives in RAM.
-  3. If the owner writes **without Reply**, the bot answers: *"Use Reply on an actor's message so I know who it's for."* No event goes to the host.
+  2. If the message isn't in the table (after a reboot or eviction), the actor is recovered from the `[A]` prefix of the replied-to text, which Telegram includes in the update. The event then carries `"src":"prefix"`. Routing therefore survives reboots even though the table lives in RAM. Only a replied-to message written by this bot counts (its `from.id` equals the bot's user id, the digits of the token before `:`), so a Reply to the owner's own `[A] …` text, or to another bot's, is not routed.
+  3. If the owner writes **without Reply**, or replies to a message that carries no actor (e.g. the hint itself), the bot answers, as a Telegram reply to that message: *"Use Reply on an actor's message so I know who it's for."* No event goes to the host.
+  - A reply that is a photo or another non-text message routes the same way; its `text` is the caption, or empty.
 - **Pending ("unanswered") table:** RAM only, 64 entries. An entry is created by each `tg send` and becomes *answered* on the first owner reply to it, or through `tg ack`. When the table is full, the oldest answered entry is evicted first. If every entry is still pending, the oldest pending entry is dropped and a `pending_dropped` event is emitted. Ages use uptime (monotonic), so no SNTP is needed.
-- **Receiving:** long polling `getUpdates` (timeout 50 s, `allowed_updates=["message"]`) on its own task and HTTPS connection. Sends use a second keep-alive connection. On HTTP 429 the client honours `retry_after`.
-- **Delivery semantics:** at-least-once. The getUpdates offset is confirmed only after the event has been emitted. Telegram keeps unconfirmed updates for 24 h, so replies sent while the board was off arrive after boot. A crash between emitting and confirming can produce a duplicate; hosts dedupe by the reply's `msg` id.
+- **Receiving:** long polling `getUpdates` (timeout 50 s, `allowed_updates=["message"]`) on its own task and HTTPS connection. Sends use a second keep-alive connection. On HTTP 429 the client honours `retry_after`. Polling starts once `getMe` and `deleteWebhook` have succeeded for the stored token. After a failed poll or a Wi-Fi drop the next `getUpdates` uses timeout 0, and after a Wi-Fi reconnect the send task probes once with `getMe`, so the bridge is `online` again within seconds rather than after the next long poll. Failed polls back off 1, 2, 4, … 30 s.
+- **Hint rate:** at most one hint reply per 10 s; further non-routable owner messages in that time get none. `tg send` requests go ahead of a queued hint.
+- **Delivery semantics:** at-least-once. An update's offset advances only after its `reply` event has been emitted (written to the host if one is connected, and stored in the event ring), and Telegram drops the update only when the next getUpdates confirms that offset. Telegram keeps unconfirmed updates for 24 h, so replies sent while the board was off arrive after boot. A reboot or crash between emitting and confirming delivers the reply again after boot (then with `"src":"prefix"`, since the table is gone); hosts dedupe by the reply's `msg` id.
 - **Online notice:** after each boot, once Telegram is first reachable, the bot posts `embpet online` with firmware version and reset reason. Not sent on later reconnects.
 - **TLS:** server verification uses the IDF certificate bundle, with no pinned certificate. The default common-CA bundle (`CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN`) validates `api.telegram.org` (verified on the device). mbedTLS dynamic buffers are on to keep idle RAM low.
 - **Responses** larger than 16 KB are rejected; a getUpdates batch that is too large is fetched again one update at a time with a larger cap (docs/PLAN.md 1.2). HTTP 401/404 from the Bot API mean the token was rejected (`auth_error`); on 429 the client waits `retry_after`; network errors back off 1, 2, 4, 8, 16 s, then every 30 s.
@@ -194,7 +196,7 @@ Common fields: `t` (`res` | `evt`), `seq` (per-boot frame counter, starting at 1
 @@{"t":"res","seq":15,"boot":"9f3a11c2","cmd":"tg send","rid":"7","actor":"A","ok":true,"msg":1234}
 @@{"t":"res","seq":16,"boot":"9f3a11c2","cmd":"io set","rid":"8","ok":false,"err":"bad_pin","msg":"pin 9 is not an output"}
 ```
-`tg send` blocks until Telegram answers (timeout 10 s). It fails immediately with `err:"offline"` if Wi-Fi or Telegram is down.
+`tg send` blocks until Telegram answers (timeout 10 s). It fails immediately, without contacting Telegram, in this order: `bad_args` / `too_long` for the text (invalid UTF-8, over the limits of §2.1); `not_configured` if the Wi-Fi credentials, the bot token or the owner chat are missing; `offline` if Wi-Fi or Telegram is down; `auth_error` if Telegram rejected the token. Telegram's own answers map as: network or 5xx → `offline`, no answer within 10 s → `timeout`, 429 → `busy` (later sends also get `busy` until `retry_after` has passed), 403 (bot blocked) or 400 "chat not found" → `not_configured`, other 400s → `bad_args`. After a `timeout` the message may still be delivered; it is then added to the pending table like any sent message (a `pending` event shows it), and a reply to it routes normally.
 
 Error codes (`err`), with a human-readable `msg` alongside:
 
@@ -237,7 +239,7 @@ The last 32 events are kept in RAM. After a host reconnects it can replay them w
 | `tg token <token>` | Store the bot token and restart the poller | `bot` (username, from `getMe`) |
 | `tg pair` | Start owner pairing | `code`, `expires_s` |
 | `tg owner [<chat_id>\|--clear]` | Show, set or clear the owner chat | `chat_id` |
-| `tg status` | Bridge status | `state`, `bot`, `owner`, `token` (masked), `pending` |
+| `tg status` | Bridge status | `state`, `detail` (as in the `tg` event), `bot`, `owner` (`null` if unset), `token` (masked, `""` if unset), `pending` |
 | `wifi set "<ssid>" ["<pass>"]` | Store credentials; reconnects at once (the res does not wait for it; omit the password for an open network) | — (then `wifi` event) |
 | `wifi status` | Connection info | `state` (`up`/`down`/`unconfigured`), `ssid` (empty if unset), `txpower` (dBm); `ip` and `rssi` only when `up` |
 | `wifi txpower <dBm>` | TX power, 2–20 dBm in 0.25 steps (default 8.5), stored and applied at once | `txpower` |
@@ -259,16 +261,22 @@ Wi-Fi behaviour: the station reconnects with exponential backoff (1, 2, 4, 8, 16
 
 ```
 > tg send -a A -i 1 "Build #42 failed on step 'test'. Retry?"
-@@{"t":"res","seq":20,"boot":"9f3a11c2","cmd":"tg send","rid":"1","actor":"A","ok":true,"msg":501}
+@@{"t":"evt","seq":20,"boot":"9f3a11c2","ev":"pending","count":1}
+@@{"t":"res","seq":21,"boot":"9f3a11c2","cmd":"tg send","rid":"1","actor":"A","ok":true,"msg":501}
 > tg send -a B -i 2 "Disk at 91% on nas01. Clean /tmp?"
-@@{"t":"res","seq":21,"boot":"9f3a11c2","cmd":"tg send","rid":"2","actor":"B","ok":true,"msg":502}
+@@{"t":"evt","seq":22,"boot":"9f3a11c2","ev":"pending","count":2}
+@@{"t":"res","seq":23,"boot":"9f3a11c2","cmd":"tg send","rid":"2","actor":"B","ok":true,"msg":502}
                                      ... LED: 5 Hz bursts (2 pending)
    owner: Reply on [B] → "yes"
-@@{"t":"evt","seq":22,"boot":"9f3a11c2","ev":"reply","actor":"B","to":502,"msg":503,"text":"yes","date":1760450100,"src":"table"}
+@@{"t":"evt","seq":24,"boot":"9f3a11c2","ev":"reply","actor":"B","to":502,"msg":503,"text":"yes","date":1760450100,"src":"table"}
+@@{"t":"evt","seq":25,"boot":"9f3a11c2","ev":"pending","count":1}
    owner: Reply on [A] → "no, check flaky test first"
-@@{"t":"evt","seq":24,"boot":"9f3a11c2","ev":"reply","actor":"A","to":501,"msg":504,"text":"no, check flaky test first","date":1760450130,"src":"table"}
+@@{"t":"evt","seq":26,"boot":"9f3a11c2","ev":"reply","actor":"A","to":501,"msg":504,"text":"no, check flaky test first","date":1760450130,"src":"table"}
+@@{"t":"evt","seq":27,"boot":"9f3a11c2","ev":"pending","count":0}
                                      ... LED off
 ```
+
+The `pending` event of a send comes before its `res` (the send task records the message as soon as Telegram confirms it); a `reply` event comes before the `pending` event of the message it answers.
 
 ---
 
@@ -349,7 +357,8 @@ tools/embpet_cli.py   send one command, print the matching @@ response (`CMD [AR
 tools/console_test.py device tests of the console: functional, soak (port closed), reopen (no reset on open)
 tools/hil.py          run test/hil (pytest, project .venv) -- use `scripts/hw.sh python tools/hil.py -k smoke`
 tools/tg_from_env.py  store TG_TOKEN from .env.local on the board in-process (never in argv, never printed)
-tools/tg_test.py      device tests of the Bot API client (test build, components/tgbot/tgtest.defaults): api, soak
+tools/tg_test.py      device tests of the Bot API client (test build, components/tgbot/tgtest.defaults, bridge off): api, soak
+tools/bridge_test.py  device tests of the bridge (test build, components/tgbot/bridgetest.defaults): auto (no user, nothing sent), human (README 3.5 with the owner replying in Telegram)
 test/hil/             hardware-in-the-loop pytest suite; skips when no board is attached
 scripts/dev-venv.sh   create the git-ignored .venv (ESP-IDF interpreter + pyserial + pytest)
 scripts/bootstrap.sh  install a self-contained ESP-IDF into a given root

@@ -48,9 +48,9 @@ scripts/         bootstrap.sh, export.sh, test_host.sh, dev-venv.sh
 
 | Context | Owner of | Stack (start) | Notes |
 |---|---|---|---|
-| console REPL task | command parsing, res frames | 6 KB | Never does TLS. `tg send` waits on a semaphore for the send task. |
-| `tg_send` task | send HTTPS handle, request queue | 8 KB | sendMessage, hint replies, online notice |
-| `tg_poll` task | poll HTTPS handle, getUpdates offset | 8 KB | Routes replies and emits `reply` events. Advances the offset only after the frame is written. |
+| console REPL task | command parsing, res frames | 6 KB | Never does TLS. `tg send` waits on its request's semaphore for the send task, with its own 10 s deadline. Measured (embpet-64s): 2952 B free after 4 KB `tg send` lines, injected replies and every tg command. |
+| `tg_send` task | send HTTPS handle, request queue | 8 KB | sendMessage, hint replies, online notice; getMe + deleteWebhook per token, one getMe probe after each Wi-Fi reconnect; hints at most 1 per 10 s, `tg send` queued ahead of them. Priority 2, below the console. Measured: 4988 B free. |
+| `tg_poll` task | poll HTTPS handle, getUpdates offset | 8 KB | Routes replies and emits `reply` events. Advances the offset only after the frame is written. Priority 2. Measured: 5336 B free, with long polls but no real owner reply yet (the injected replies of `tools/bridge_test.py auto` run on the console task, which they then also measure). |
 | esp_timer task | pulse ends, debounce expiry, LED tick (50 ms) | default | Callbacks must be short. They may call `proto_evt`. All esp_timer callbacks share one 3584-byte stack; measured at least 2144 B free with `proto_evt` and input events, so a new callback must stay under about 1.5 KB. |
 | GPIO ISR | raw edge counters, debounce re-arm | ISR | No logging, no frames |
 | default event loop | Wi-Fi/IP events, reconnect backoff | default | Updates `state` |

@@ -1,0 +1,7 @@
+# Test build for tools/bridge_test.py: the bridge plus the `tg t_*` test commands (token,
+# owner chat, injected updates, pending entries, stack headroom). Never flash this to a
+# deployed board.
+#   scripts/idf.sh idf.py -B build-bridgetest -D SDKCONFIG=build-bridgetest/sdkconfig \
+#       -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;components/tgbot/bridgetest.defaults" build
+CONFIG_EMBPET_TG_TEST=y
+CONFIG_EMBPET_TG_BRIDGE=y

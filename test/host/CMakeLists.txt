@@ -107,6 +107,15 @@ embpet_add_host_test(
     WITH_CJSON)
 
 embpet_add_host_test(
+    NAME     bridge
+    SOURCES  bridge/test_bridge.c ${EMBPET_ROOT}/components/tgbot/bridge_core.c
+             ${EMBPET_ROOT}/components/tgbot/tgapi_core.c
+             ${EMBPET_ROOT}/components/tgbot/pending_core.c
+             ${EMBPET_ROOT}/components/tgbot/prefix_core.c
+    INCLUDES ${EMBPET_ROOT}/components/tgbot/include
+    WITH_CJSON)
+
+embpet_add_host_test(
     NAME     cfg
     SOURCES  cfg/test_cfg.c ${EMBPET_ROOT}/components/netcfg/cfg_core.c
     INCLUDES ${EMBPET_ROOT}/components/netcfg/include)

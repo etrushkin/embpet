@@ -1,5 +1,14 @@
 menu "embpet tgbot"
 
+    config EMBPET_TG_BRIDGE
+        bool "Telegram bridge (tg send, poller, routing, pending table)"
+        default y
+        help
+            Starts the tg_poll and tg_send tasks and registers the tg
+            commands (README 2.1, 3.4). Only the Bot API client test build
+            (tgtest.defaults) turns it off, because its own test workers
+            poll the same bot and two getUpdates loops conflict (HTTP 409).
+
     config EMBPET_TG_TEST
         bool "Bot API client test commands (never enable in production)"
         default n
@@ -8,6 +17,8 @@ menu "embpet tgbot"
             call getMe / deleteWebhook / getUpdates / sendMessage from two
             worker tasks that own the poll and send connections, and run a
             polling + sending soak with heap statistics. Used by
-            tools/tg_test.py.
+            tools/tg_test.py. With the bridge on it also adds the bridge test
+            commands (owner chat, injected updates, pending entries, stack
+            headroom) used by tools/bridge_test.py.
 
 endmenu
