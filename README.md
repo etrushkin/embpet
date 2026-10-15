@@ -41,7 +41,7 @@ Example from the owner's side: actors **A** and **B** each send you a message. I
 | 2 | OUT2 | **Strapping pin**, must read high at reset or the chip may not boot. Wire its opto in the sink configuration (§1.3). |
 | 3 | OUT3 | |
 | 4–7 | OUT4–OUT7 | JTAG pins (MTMS/MTDI/MTCK/MTDO); free because JTAG runs over USB |
-| 8 | Status LED | Onboard blue LED, **active-low** (verified on the unit: GPIO8 high = dark, low = lit). **Strapping pin**, must be high at reset; leave nothing else on it. |
+| 8 | Status LED | Onboard blue LED, **active-low** (verified on the unit: GPIO8 high = dark, low = lit; `CONFIG_EMBPET_LED_ACTIVE_LOW=y`). **Strapping pin**, must be high at reset; leave nothing else on it. |
 | 9 | BOOT button | Strapping; reserved |
 | 10 | IN10 | |
 | 20 | IN20 | U0RXD. Sits next to the antenna, so wires here can detune Wi-Fi. |
@@ -145,9 +145,18 @@ Wi-Fi SSID and password, Wi-Fi TX power, bot token, owner `chat_id`, per-pin boo
 
 ### 3.1 Transport
 - USB-Serial/JTAG CDC port; the baud rate is irrelevant. It uses the `esp_console` REPL (linenoise) with prompt `embpet> `, and the maximum command line is **4400 bytes**.
-- **Port-open reset:** some tools reset the C3 when they open the port because of the DTR/RTS line states. Host programs should set DTR=RTS=false *before* opening (pyserial: `s = serial.Serial(); s.dtr = s.rts = False; s.port = ...; s.open()`). `tools/embpet_cli.py` does this.
+- **Port-open reset (verified on macOS, pyserial 3.x; run counts per case below):** opening the port can reset the C3 or hold it in reset, depending on the DTR/RTS order.
+  - Default pyserial open (DTR and RTS asserted): the chip stays **silent for as long as the port is open**, presumably because RTS holds EN low. 5/5 runs.
+  - `dtr = rts = False` set *before* `open()` still **resets the chip on every open** (`rst:0x15 USB_UART_CHIP_RESET`, uptime restarts at 0): 5/5 runs, and 4 further opens in the closed-port runs. macOS asserts both lines on `open()`, and pyserial then clears DTR first and RTS second, so the chip sees (DTR,RTS) = (1,1), (0,1), (0,0); the likely cause is the (0,1) step.
+  - **No reset:** clear **RTS first**, then DTR (skip pyserial's DTR update in `open()`, then clear RTS, then DTR). In about 15 such opens (including 10 s closed periods) the chip kept the same boot, with continuous uptime.
+  - The first open after any chip reset (flash, reset) delivered its first byte only after about 2.5 s; later opens deliver within 0.1 s.
+  - A host program must therefore use the RTS-first order, or accept one reset per command.
 - **Log sink: USB-Serial/JTAG is the primary and only console**, for both the 2nd-stage bootloader and the app (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`, `CONFIG_ESP_CONSOLE_SECONDARY_NONE=y`). UART0 is never initialised as a console, so GPIO20/21 are free for inputs. The 1st-stage ROM boot log still goes to UART0 (GPIO21) as well as USB. That's left as is: no eFuse changes.
-- If no host is reading, console output is dropped after a short TX timeout instead of blocking the firmware.
+- **Port closed (verified, 10 s closed, 2 cycles, both console modes):** nothing blocks for long and nothing is replayed.
+  - Output written while no program has the port open is **dropped**; after reopening, the stream continues at the current line (no backlog).
+  - The first write after the host stops reading stalls the writer for the TX timeout, **40–50 ms** (IDF `TX_FLUSH_TIMEOUT_US` = 50 ms), once per close. All later writes are fast: about 0.2 ms per 70-byte line without the USB-Serial/JTAG driver, about 0.7 ms with the driver installed (as `esp_console` does). Worst-case writer stall: **≈50 ms**. A same-priority task kept its 10 ms cadence during the stall (no heartbeat gap above 10 ms). A lower-priority task was not measured; on the single core it could in principle be delayed by up to the stall.
+  - `usb_serial_jtag_is_connected()` follows USB start-of-frame packets, not the open state of the port: it stayed **true while the port was closed** (the cable stays enumerated), and was false on only 1 of about 7000 writes (a transient at reconnect). Do not use it to detect a listening host; it only skips writes while the cable is unplugged (the VFS write then returns -1 at once).
+  - Design consequence: a single `fwrite` under the output lock holds the lock for at most about 50 ms per host stall.
 - The console also carries ESP-IDF log lines, the echoed input and the prompt. **Hosts must ignore every line that does not start with `@@`.** The console log level defaults to `WARN` and can be changed with `sys log`.
 
 ### 3.2 Host → FW: plain commands
