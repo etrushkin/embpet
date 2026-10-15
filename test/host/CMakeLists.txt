@@ -114,3 +114,19 @@ embpet_add_host_test(
     SOURCES  proto/test_proto.c ${EMBPET_ROOT}/components/proto/proto_core.c
     INCLUDES ${EMBPET_ROOT}/components/proto/include
     WITH_CJSON)
+
+embpet_add_host_test(
+    NAME     pulse
+    SOURCES  pulse/test_pulse.c ${EMBPET_ROOT}/components/io/pulse_core.c
+    INCLUDES ${EMBPET_ROOT}/components/io/include)
+
+embpet_add_host_test(
+    NAME     debounce
+    SOURCES  debounce/test_debounce.c ${EMBPET_ROOT}/components/io/debounce_core.c
+    INCLUDES ${EMBPET_ROOT}/components/io/include)
+
+embpet_add_host_test(
+    NAME     wifi
+    SOURCES  wifi/test_wifi.c ${EMBPET_ROOT}/components/netcfg/wifi_core.c
+             ${EMBPET_ROOT}/components/netcfg/cfg_core.c
+    INCLUDES ${EMBPET_ROOT}/components/netcfg/include)

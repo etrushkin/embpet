@@ -1,0 +1,12 @@
+menu "embpet io"
+
+    config EMBPET_IO_TEST
+        bool "On-chip GPIO test hooks (never enable in production)"
+        default n
+        help
+            Compiles in test-only code: the outputs become INPUT_OUTPUT and an
+            any-edge ISR timestamps their edges (`io test`), so the pulse
+            length can be measured on the chip itself. Used by
+            tools/io_test.py.
+
+endmenu

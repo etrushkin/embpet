@@ -51,15 +51,15 @@ scripts/         bootstrap.sh, export.sh, test_host.sh, dev-venv.sh
 | console REPL task | command parsing, res frames | 6 KB | Never does TLS. `tg send` waits on a semaphore for the send task. |
 | `tg_send` task | send HTTPS handle, request queue | 8 KB | sendMessage, hint replies, online notice |
 | `tg_poll` task | poll HTTPS handle, getUpdates offset | 8 KB | Routes replies and emits `reply` events. Advances the offset only after the frame is written. |
-| esp_timer task | pulse ends, debounce expiry, LED tick (50 ms) | default | Callbacks must be short. They may call `proto_evt`. |
+| esp_timer task | pulse ends, debounce expiry, LED tick (50 ms) | default | Callbacks must be short. They may call `proto_evt`. All esp_timer callbacks share one 3584-byte stack; measured at least 2144 B free with `proto_evt` and input events, so a new callback must stay under about 1.5 KB. |
 | GPIO ISR | raw edge counters, debounce re-arm | ISR | No logging, no frames |
 | default event loop | Wi-Fi/IP events, reconnect backoff | default | Updates `state` |
 
 - **Shared state:** `proto/state.c`, mutex-protected. It holds wifi {state, ip, rssi}, tg {state, bot}, pending count, booting flag and configured flag. Subscribers get change callbacks. The LED and the `wifi`/`tg`/`pending` events are driven from here.
 - **Frames:** `proto_res` / `proto_evt` are callable from any task context. Each frame is one `fwrite` under a mutex. A frame is skipped (but kept in the ring) if the USB host isn't connected, so the caller never blocks.
 - **Init order** (`app_main`):
-  1. Outputs: latch high (off), set as output, then apply boot levels.
-  2. NVS and cfg.
+  1. Outputs: latch high (off), then set as output. All eight stay off.
+  2. NVS and cfg, then apply the `out_boot` levels (they live in cfg, so they cannot be applied in step 1).
   3. proto and state, then the `boot` event.
   4. Inputs and LED (booting = solid on).
   5. Console REPL.

@@ -123,15 +123,18 @@ While offline the unanswered pattern is hidden; the `pending` count is still ava
 GPIO 10, 20 and 21, wired through optos (§1.3). Active means the opto is energised and the pin is low.
 
 - **Debounce:** an any-edge GPIO interrupt (re)starts a per-pin debounce timer. A change is accepted once the level has been stable for the debounce time. Default 20 ms, per pin 0–1000 ms, set with `io debounce` and stored in NVS.
-- **Events:** each accepted change emits an `input` event (`pin`, `active`, `extra`).
+- **Debounce 0:** the level is sampled about 1 ms after the first edge (one storm window), so bounces inside that millisecond are folded into `extra`. An input reports at most 1000 events per second.
+- **Edge storms:** the ISR always counts the edge but re-arms the timer at most once per millisecond, so a storm cannot keep the CPU busy; the event follows once the level has been stable for the debounce time.
+- **Events:** each accepted change emits an `input` event (`pin`, `active` as `1`/`0`, `extra`). There is no event at boot for an input that is already active.
 - **`extra`** is the number of raw edges since the previous `input` event for that pin, minus the one edge that produced the change. A clean change gives `0`. Contact bounce gives an even number (2, 4, …). A glitch shorter than the debounce time, which produces no event, is counted into the next event's `extra`. A host detects lost events through gaps in the frame `seq`.
-- `io in` returns `active`, raw `level`, and `extra` accumulated so far since the last event, for each input.
+- `io in` returns `active` (`1`/`0`, the last reported state), raw `level` and `extra` accumulated so far since the last event, for each input. `io debounce <pin> <ms>` takes pin 10, 20 or 21 (else `err:"bad_pin"`) and 0–1000 ms (else `err:"bad_args"`); with no arguments it lists the three times.
 
 ### 2.4 Outputs
 
 - `io set <pin> on|off|toggle` sets a level. It cancels any running pulse on that pin.
 - `io pulse <pin> [-d ms]` inverts the current level for `ms` (default **100**, range 1–600000), then restores it. Re-pulsing a pin that is already pulsing restarts the timer, and the original level is still the one restored.
-- `io get` reports each pin's level, whether it is pulsing, and the remaining pulse time in ms.
+- `io get` reports each pin's level, whether it is pulsing, and the remaining pulse time in ms. `io set` and `io pulse` answer with the pin's resulting level (`pulse`: the level during the pulse, plus `remaining_ms`).
+- A pin that is not an output (not 0–7) gives `err:"bad_pin"` (a negative pin looks like an option and gets `bad_args`); `io pulse -d` outside 1–600000 gives `err:"bad_args"`.
 - `io boot <pin> on|off` stores the logical level a pin takes at app start (NVS, default `off`). `io boot` with no arguments lists them.
 - All output levels are **logical**: `on` = opto conducting, regardless of wiring polarity (§1.3).
 
@@ -169,7 +172,7 @@ Every command is a normal console line. Two options are accepted on **every** co
 | `-a <actor>` | Actor ID, `[A-Za-z0-9_-]{1,16}`. **Required** for `tg send`; optional elsewhere. |
 | `-i <rid>` | Request ID chosen by the host, `[A-Za-z0-9_-]{1,32}`, for matching responses. |
 
-Text arguments are double-quoted. Inside quotes, `\"`, `\\` and `\n` are escapes, and UTF-8 passes through as-is. Any other escape, a missing closing quote, a backslash at the end of the line, or text glued to a closing quote is rejected with `err:"bad_args"`. Outside quotes, backslashes and quotes are ordinary characters. Arguments are separated by spaces or tabs; inside quotes a tab is ordinary text. A text argument that starts with `-` must come after `--`, or it is taken as an option.
+Text arguments are double-quoted. Inside quotes, `\"`, `\\` and `\n` are escapes, and UTF-8 passes through as-is. Any other escape, a missing closing quote, a backslash at the end of the line, or text glued to a closing quote is rejected with `err:"bad_args"`. Outside quotes, backslashes and quotes are ordinary characters. Arguments are separated by spaces or tabs; inside quotes a tab is ordinary text. A text argument that starts with `-` must come after `--`, or it is taken as an option. `tools/embpet_cli.py` does this for everything after its own `--`: `embpet_cli.py wifi set -- "my ssid" "-pass"` sends `wifi set -i <rid> -- "my ssid" "-pass"`.
 
 `-a` and `-i` are echoed back even when the command fails, as long as their values are valid. That covers an unknown command, a bad option or a bad escape. A response to an invalid `-i` value has no `rid`. When quoting fails or the line is too long, only the options **before** the faulty spot are seen, so put `-a` and `-i` right after the command words.
 
@@ -213,7 +216,7 @@ The `cmd` of an unknown command echoes the typed command words (e.g. `"sys nope"
 | `ev` | Fields | When |
 |---|---|---|
 | `boot` | `fw`, `idf`, `reset_reason` | Once after start |
-| `wifi` | `state` (`up`/`down`), `ip`, `rssi` | Wi-Fi changes |
+| `wifi` | `state` (`up`/`down`), `ip`, `rssi` (`ip` and `rssi` only when `up`) | Wi-Fi goes up or down, or the IP changes; not on every reconnect attempt |
 | `tg` | `state` (`online`/`offline`/`unconfigured`/`auth_error`), `detail` | Telegram reachability changes |
 | `reply` | `actor`, `to` (msg_id replied to), `msg` (owner's msg_id), `text`, `date` (unix), `src` (`table`/`prefix`) | Owner replied to an actor's message |
 | `paired` | `chat_id` | Owner bound with `/start <code>` |
@@ -234,20 +237,22 @@ The last 32 events are kept in RAM. After a host reconnects it can replay them w
 | `tg pair` | Start owner pairing | `code`, `expires_s` |
 | `tg owner [<chat_id>\|--clear]` | Show, set or clear the owner chat | `chat_id` |
 | `tg status` | Bridge status | `state`, `bot`, `owner`, `token` (masked), `pending` |
-| `wifi set "<ssid>" ["<pass>"]` | Store credentials and reconnect | — (then `wifi` event) |
-| `wifi status` | Connection info | `state`, `ssid`, `ip`, `rssi`, `txpower` |
-| `wifi txpower <dBm>` | TX power, 2–20 dBm (default 8.5) | `txpower` |
+| `wifi set "<ssid>" ["<pass>"]` | Store credentials; reconnects at once (the res does not wait for it; omit the password for an open network) | — (then `wifi` event) |
+| `wifi status` | Connection info | `state` (`up`/`down`/`unconfigured`), `ssid` (empty if unset), `txpower` (dBm); `ip` and `rssi` only when `up` |
+| `wifi txpower <dBm>` | TX power, 2–20 dBm in 0.25 steps (default 8.5), stored and applied at once | `txpower` |
 | `io in` | Read inputs | `in:[{pin,active,level,extra}]` |
 | `io debounce [<pin> <ms>]` | Show or set debounce | `debounce:{"10":20,...}` |
 | `io set <pin> on\|off\|toggle` | Set an output | `pin`, `level` |
 | `io pulse <pin> [-d ms]` | Pulse-toggle an output (default 100 ms) | `pin`, `level`, `remaining_ms` |
 | `io get` | Output states | `out:[{pin,level,pulsing,remaining_ms}]` |
-| `io boot [<pin> on\|off]` | Per-pin boot level | `boot:{"0":"off",...}` |
+| `io boot [<pin> on\|off]` | Per-pin boot level | `levels:{"0":"off",...}` (not `boot`: that key is the frame's boot id) |
 | `evt since <seq>` | Replay buffered events with seq > `<seq>` (`0` = all), verbatim with their original seq | events re-emitted, then `res` with `count` and `truncated` (true if some newer events had already left the buffer) |
 | `sys info` | Versions, uptime, heap, MAC | `fw`, `idf`, `uptime_s`, `heap_free`, `heap_min`, `mac`, `reset_reason`, `log` (level), `log_dropped` |
 | `sys log <none\|error\|warn\|info\|debug>` | Console log level (not stored; `warn` after each boot) | `level` |
 | `sys reboot` | Restart | `res`, then reboot after about 100 ms |
 | `help` | Print every command's syntax (plain text, for humans) | `cmds` (names) |
+
+Wi-Fi behaviour: the station reconnects with exponential backoff (1, 2, 4, 8, 16 s, then every 30 s), reset by a successful connection or by `wifi set`. With no SSID stored it makes no connection attempts (`unconfigured`). The driver keeps credentials in RAM only (`WIFI_STORAGE_RAM`); the NVS config store is the single place they are saved.
 
 ### 3.5 Example: two actors
 
@@ -338,8 +343,12 @@ main/Kconfig.projbuild  "embpet" menu (limits and defaults)
 partitions.csv        nvs, phy_init, factory (3 MB, no OTA)
 sdkconfig.defaults    build configuration (sdkconfig itself is generated)
 cmake/                embpet_warnings.cmake, the shared warning policy
-tools/embpet_cli.py   send one command, print the matching @@ response; --monitor SEC [--reset] dumps raw console output
+tools/embpet/         Python library: reset-free serial open, @@ frame parser, quoting, Board.cmd() / Board.events()
+tools/embpet_cli.py   send one command, print the matching @@ response (`CMD [ARG ...] [-- TEXT ...]`: words after `--` may start with `-`); --listen SEC prints evt frames; --monitor SEC [--reset] dumps raw console output
 tools/console_test.py device tests of the console: functional, soak (port closed), reopen (no reset on open)
+tools/hil.py          run test/hil (pytest, project .venv) -- use `scripts/hw.sh python tools/hil.py -k smoke`
+test/hil/             hardware-in-the-loop pytest suite; skips when no board is attached
+scripts/dev-venv.sh   create the git-ignored .venv (ESP-IDF interpreter + pyserial + pytest)
 scripts/bootstrap.sh  install a self-contained ESP-IDF into a given root
 scripts/export.sh     activate that ESP-IDF in the current shell (source it)
 skills/               agent skills (wifi-connect, …); symlinked into .claude/skills and .agents/skills (both git-ignored)

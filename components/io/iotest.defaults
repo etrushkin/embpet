@@ -1,0 +1,5 @@
+# Test build for tools/io_test.py: on-chip edge recorder and input emulation. Never flash
+# this to a deployed board.
+#   scripts/idf.sh idf.py -B build-iotest -D SDKCONFIG=build-iotest/sdkconfig \
+#       -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;components/io/iotest.defaults" build
+CONFIG_EMBPET_IO_TEST=y
