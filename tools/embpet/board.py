@@ -39,6 +39,7 @@ class Board:
         self.on_event = None
         self._events = collections.deque(maxlen=EVENT_BACKLOG)
         self._buf = b""
+        self._serial_cls = serial_cls
         self._s = open_port(port, serial_cls=serial_cls)
         try:
             if reset:
@@ -49,6 +50,28 @@ class Board:
 
     def close(self):
         self._s.close()
+
+    def reconnect(self, delay=3.0, timeout=30.0):
+        """Reopen the port after a chip reset that re-enumerates the USB device (e.g.
+        `sys reboot`): wait DELAY seconds, then retry the open until TIMEOUT. Buffered input
+        and queued events are dropped. Raises NoBoard when the port does not come back."""
+        try:
+            self._s.close()
+        except OSError:
+            pass
+        time.sleep(delay)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                # serial.SerialException is an OSError subclass, so this covers it
+                self._s = open_port(self.port, serial_cls=self._serial_cls)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise NoBoard("port %s did not come back" % self.port)
+                time.sleep(0.5)
+        self._buf = b""
+        self._events.clear()
 
     def __enter__(self):
         return self
@@ -74,7 +97,10 @@ class Board:
         """Yield decoded console lines until SECONDS have passed (None = forever)."""
         deadline = None if seconds is None else time.monotonic() + seconds
         while deadline is None or time.monotonic() < deadline:
-            self._buf += self._s.read(4096)
+            # read(4096) would wait out the whole 0.2 s timeout; read what has arrived, or
+            # block for one byte, so a response is seen as soon as it is complete.
+            waiting = getattr(self._s, "in_waiting", 0)
+            self._buf += self._s.read(waiting if isinstance(waiting, int) and waiting > 0 else 1)
             while b"\n" in self._buf:
                 if deadline is not None and time.monotonic() >= deadline:
                     return          # log spam must not stretch the deadline; keep the rest

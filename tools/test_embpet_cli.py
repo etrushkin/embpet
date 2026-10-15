@@ -298,6 +298,54 @@ class BoardRobustnessTest(unittest.TestCase):
             make_board(lambda ln: []).wait_ready(timeout=0.5)
 
 
+class BoardReconnectTest(unittest.TestCase):
+    """Board.reconnect() after a chip reset that re-enumerates the USB device."""
+
+    def make(self, fail_opens):
+        """A Board whose next FAIL_OPENS opens raise SerialException (an OSError)."""
+        import serial
+        state = {"fail": 0, "opens": 0}
+
+        class Flaky(FakeBoardSerial):
+            def open(self):
+                state["opens"] += 1
+                if state["fail"] > 0:
+                    state["fail"] -= 1
+                    raise serial.SerialException("port is gone")
+                super().open()
+
+        b = Board("/dev/null", serial_cls=Flaky)
+        state["fail"] = fail_opens
+        state["opens"] = 0
+        return b, state
+
+    def test_retries_until_the_port_is_back_and_drops_buffered_input(self):
+        from unittest import mock
+        b, state = self.make(fail_opens=2)
+        b._buf = b"stale partial line"
+        b._events.append({"t": "evt", "seq": 1})
+        old = b._s
+        with mock.patch("embpet.board.time.sleep"):
+            b.reconnect(delay=0, timeout=30)
+        self.assertEqual(state["opens"], 3)
+        self.assertIsNot(b._s, old)
+        self.assertTrue(b._s.is_open)
+        self.assertEqual(b._buf, b"")
+        self.assertEqual(list(b.events(0)), [])
+
+    def test_raises_noboard_when_the_port_never_comes_back(self):
+        from unittest import mock
+        from embpet import NoBoard
+        b, state = self.make(fail_opens=10 ** 6)
+        # a clock that jumps 1 s per call, so the 2 s timeout passes without waiting
+        ticks = iter(range(0, 1000))
+        with mock.patch("embpet.board.time.sleep"), \
+                mock.patch("embpet.board.time.monotonic", lambda: next(ticks)):
+            with self.assertRaises(NoBoard):
+                b.reconnect(delay=0, timeout=2)
+        self.assertGreaterEqual(state["opens"], 2)
+
+
 class CliMainTest(unittest.TestCase):
     def run_main(self, argv):
         import embpet_cli

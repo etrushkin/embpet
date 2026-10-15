@@ -31,6 +31,7 @@
 #include "driver/usb_serial_jtag_select.h"
 #include "driver/usb_serial_jtag_vfs.h"
 #include "escape_core.h"
+#include "esp_freertos_hooks.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -52,6 +53,8 @@ static const char *TAG = "console";
 #define RX_CHUNK       64
 #define USJ_TX_RING    2048
 #define USJ_RX_RING    (CONFIG_EMBPET_CMDLINE_MAX + 256)   /* one full line fits */
+#define IDLE_STARVE_MS 100          /* see let_idle_run */
+#define IDLE_WAIT_TICKS 10          /* at most this long per wait (100 ms at 100 Hz) */
 
 struct console_req {
     proto_ctx_t ctx;
@@ -71,6 +74,8 @@ typedef struct {
 static cmd_entry_t s_cmds[CONSOLE_MAX_CMDS];
 static size_t s_ncmds;              /* published with release/acquire, see console_register */
 static atomic_uint s_log_dropped;
+static atomic_uint s_idle_tick;     /* tick count when the idle task last ran */
+static atomic_uint s_idle_runs;     /* bumped on every idle task pass */
 static char s_line[CONFIG_EMBPET_CMDLINE_MAX + 1];
 static char *s_argv[ARGV_MAX];
 
@@ -332,6 +337,36 @@ static void out(const char *s, size_t n)
     fflush(stdout);
 }
 
+static bool idle_hook(void)
+{
+    atomic_store(&s_idle_tick, (unsigned)xTaskGetTickCount());
+    atomic_fetch_add(&s_idle_runs, 1);
+    return true;
+}
+
+/* While input is waiting the REPL never blocks, and each command costs CPU mostly in the
+ * stdout path (about 10 us per byte with the driver, README 3.1): a host sending `sys info`
+ * back to back kept this task at about 95% CPU. The idle task then ran only in the gaps no
+ * priority 1-2 task wanted, so a TLS handshake (tg tasks, priority 2) after boot, or a host
+ * keeping a few commands in flight at any time, starved it for 5 s and tripped the task
+ * watchdog (embpet-94q). So after each command and each input chunk, once the idle task has
+ * not run for IDLE_STARVE_MS, the REPL sleeps tick by tick until it has run, for at most
+ * IDLE_WAIT_TICKS (a sleep of one tick only lasts to the next tick boundary, and priority
+ * 1-2 tasks may use all of it). That leaves lower tasks and the idle task a share of the CPU
+ * while commands are still answered; a watchdog report then points at a task that hogs the
+ * CPU itself. */
+static void let_idle_run(void)
+{
+    TickType_t since = xTaskGetTickCount() - (TickType_t)atomic_load(&s_idle_tick);
+    if (since <= pdMS_TO_TICKS(IDLE_STARVE_MS)) {
+        return;
+    }
+    unsigned runs = atomic_load(&s_idle_runs);
+    for (int k = 0; k < IDLE_WAIT_TICKS && atomic_load(&s_idle_runs) == runs; k++) {
+        vTaskDelay(1);
+    }
+}
+
 static void repl_task(void *arg)
 {
     (void)arg;
@@ -365,6 +400,7 @@ static void repl_task(void *arg)
                 wipe = true;
                 esc_line_reset(&line);
                 out(PROMPT, strlen(PROMPT));
+                let_idle_run();                     /* one chunk can hold many commands */
                 break;
             case ESC_LINE_IGNORED:
                 break;
@@ -377,6 +413,7 @@ static void repl_task(void *arg)
             mbedtls_platform_zeroize(in, sizeof(in));
             mbedtls_platform_zeroize(echo, sizeof(echo));
         }
+        let_idle_run();
     }
 }
 
@@ -409,6 +446,11 @@ static const console_cmd_t s_help = {
 esp_err_t console_start(void)
 {
     esp_err_t err = console_register(&s_help);
+    if (err != ESP_OK) {
+        return err;
+    }
+    atomic_store(&s_idle_tick, (unsigned)xTaskGetTickCount());
+    err = esp_register_freertos_idle_hook(idle_hook);
     if (err != ESP_OK) {
         return err;
     }

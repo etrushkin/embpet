@@ -166,6 +166,24 @@ Wi-Fi SSID and password, Wi-Fi TX power, bot token, owner `chat_id`, per-pin boo
   - Design consequence: a single `fwrite` under the output lock holds the lock for at most about 50 ms per host stall.
 - The console also carries ESP-IDF log lines, the echoed input and the prompt. **Hosts must ignore every line that does not start with `@@`.** The console log level is `WARN` once init is done and can be changed with `sys log`. The HTTP client, transport and TLS log tags never go above `WARN`, whatever `sys log` says, because `esp_http_client` logs the request line, which carries the bot token, at `DEBUG`.
 - **Log lines never wait for the host:** the log sink drops whole lines while the cable is unplugged or the driver's 2 KB TX buffer is full (the host stopped reading), and counts them (`sys info` → `log_dropped`). Frames are written normally. The output that fills the buffer can still pay the one 40–50 ms stall above. Measured with a soak build (an event and a log line every 100 ms, port closed for 10 min): longest event write 51 ms, longest log write 49 ms, the generator's 100 ms loop never late, and `evt since` worked after reopening.
+- **Command floods leave the idle task a share of the CPU** (embpet-94q). Each command costs the console CPU, mostly in the stdout path (about 4.7 ms per `sys info`, about 30 ms per `help`), and while input is waiting the console never blocks.
+  - After each command and each input chunk, once the idle task has not run for 100 ms, the console sleeps tick by tick (up to 10 ms each) until the idle task has run, for at most 100 ms.
+  - This leaves lower-priority tasks (TLS handshakes) and the idle task a share of the CPU. A task-watchdog report then points at a task that hogs the CPU itself.
+  - The cost is latency while lower-priority work is CPU-bound: during the Telegram TLS handshakes after boot, a command can wait up to about 0.2–0.3 s, or more when several are queued.
+  - Measured with `scripts/hw.sh python tools/wdt_repro.py [--cmd ...] [--depth 8]`, flooding from uptime 2 s to 17 s after `sys reboot`. Every run was clean: no watchdog, no lost or bad frame.
+
+    | Command | In flight | Runs | Rate | Max latency |
+    |---|---|---|---|---|
+    | `sys info` | 1 | 5 | about 215/s | 0.2–0.3 s |
+    | `sys info` | 8 | 3 | about 215/s | 0.54 s |
+    | `help` | 1 | 2 | about 32/s | 0.23 s |
+    | `help` | 8 | 2 | about 31/s | 0.72 s |
+    | `evt since 0` | 1 | 2 | about 155/s | 0.21 s |
+    | `evt since 0` | 8 | 2 | about 150/s | 0.55 s |
+
+    A probe build found the longest stretch without the idle task: 0.6–0.7 s during the handshakes (0.47 s with no traffic at all) and about 0.1–0.15 s otherwise.
+  - Before the fix, the idle task got no CPU for 5 s and the watchdog fired. A lockstep host tripped it at about 10 s of uptime, while the TLS handshakes ran. A host with 8 commands in flight tripped it at any uptime.
+  - Task-watchdog and panic reports bypass the frame lock: they are written raw from interrupt or exception context. If one appears, it can cut the frame being written. That frame fails to parse, so the host sees a missing `res`, and after a panic also a new boot id.
 
 ### 3.2 Host → FW: plain commands
 
@@ -338,6 +356,16 @@ The harness is a standalone CMake project in `test/host/` using Unity and cJSON 
 `main()`) and register it in `test/host/CMakeLists.txt` with `embpet_add_host_test(NAME ...
 SOURCES ... INCLUDES ... [WITH_CJSON])`. Host tests are built with `-Wall -Wextra -Werror`.
 They default to a Debug build with AddressSanitizer and UBSan (`-fsanitize=address,undefined`, UB is fatal); LeakSanitizer is unavailable on macOS ARM. On toolchains without the sanitizer runtimes, configure with `-DEMBPET_HOST_SANITIZE=OFF`.
+
+**Hardware-in-the-loop** (production firmware on the attached board; `scripts/dev-venv.sh` first, details in `test/hil/README.md`):
+
+```bash
+scripts/hw.sh python tools/hil.py -m "not owner and not loopback"   # default selection, about 2 min
+scripts/hw.sh python tools/hil.py -m owner      # real sends to the paired owner; asks the human to reply in Telegram
+scripts/hw.sh python tools/hil.py -m loopback   # input events; needs OUTn -> opto -> IN wiring (EMBPET_LOOPBACK, default 0:10,1:20,2:21)
+```
+
+The suites are `protocol`, `io`, `wifi` and `tg` (the Wi-Fi-down paths run in one shared outage). Tests marked `owner` or `loopback` are skipped unless selected with `-m` (or `EMBPET_HIL_OWNER=1` / `EMBPET_HIL_LOOPBACK=1`). Settings the tests change (boot levels, debounce, outputs, log level, TX power, owner, Wi-Fi and token from `.env.local`) are restored afterwards, and the NVS is never erased; hard kills (SIGKILL, a dropped port) cannot be undone by fixtures, and a board with no Wi-Fi SSID ends up on the `.env.local` network (see `test/hil/README.md`). Do not pass `-l`, `--showlocals` or `--tb=long`: they print fixture locals, which include the `.env.local` secrets. Not covered by the default run: `evt since` with `truncated: true` (loopback only), reply routing, the online notice and a valid `tg token` (owner suite and `tools/pair_test.py` only). Telethon automation of the owner replies is not implemented.
 
 ---
 
