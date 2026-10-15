@@ -14,6 +14,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "proto.h"
+#include "tgapi.h"
 
 static const char *const s_level_names[] = {
     [ESP_LOG_NONE] = "none",
@@ -29,6 +30,7 @@ static esp_log_level_t s_log_level = ESP_LOG_INFO;     /* CONFIG_LOG_DEFAULT_LEV
 void cmd_sys_set_log_level(esp_log_level_t level)
 {
     esp_log_level_set("*", level);
+    tgapi_log_guard(level);             /* "*" cleared the HTTP tags' cap (token in URL) */
     s_log_level = level;
 }
 

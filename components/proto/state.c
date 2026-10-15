@@ -83,15 +83,18 @@ void state_set_wifi(state_wifi_state_t state, const char *ip, int8_t rssi)
     }
 }
 
-void state_set_tg(state_tg_state_t state, const char *bot)
+void state_set_tg(state_tg_state_t state, const char *bot, const char *detail)
 {
     char new_bot[STATE_BOT_LEN];
+    char new_detail[STATE_DETAIL_LEN];
     copy_str(new_bot, sizeof(new_bot), bot);
+    copy_str(new_detail, sizeof(new_detail), detail);
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     bool changed = s_state.tg.state != state || strcmp(s_state.tg.bot, new_bot) != 0;
     s_state.tg.state = state;
     memcpy(s_state.tg.bot, new_bot, sizeof(new_bot));
+    memcpy(s_state.tg.detail, new_detail, sizeof(new_detail));
     s_state.gen += changed;
     state_snapshot_t snap = s_state;
     int n = s_nsubs;

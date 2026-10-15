@@ -100,6 +100,13 @@ embpet_add_host_test(
     INCLUDES ${EMBPET_ROOT}/components/tgbot/include)
 
 embpet_add_host_test(
+    NAME     tgapi
+    SOURCES  tgapi/test_tgapi.c ${EMBPET_ROOT}/components/tgbot/tgapi_core.c
+             ${EMBPET_ROOT}/components/tgbot/prefix_core.c
+    INCLUDES ${EMBPET_ROOT}/components/tgbot/include tgapi
+    WITH_CJSON)
+
+embpet_add_host_test(
     NAME     cfg
     SOURCES  cfg/test_cfg.c ${EMBPET_ROOT}/components/netcfg/cfg_core.c
     INCLUDES ${EMBPET_ROOT}/components/netcfg/include)

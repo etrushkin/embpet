@@ -1,0 +1,13 @@
+menu "embpet tgbot"
+
+    config EMBPET_TG_TEST
+        bool "Bot API client test commands (never enable in production)"
+        default n
+        help
+            Compiles in test-only console commands (`tg t_*`): store a token,
+            call getMe / deleteWebhook / getUpdates / sendMessage from two
+            worker tasks that own the poll and send connections, and run a
+            polling + sending soak with heap statistics. Used by
+            tools/tg_test.py.
+
+endmenu

@@ -42,7 +42,7 @@ scripts/         bootstrap.sh, export.sh, test_host.sh, dev-venv.sh
 | `pulse_core` | Output pulse state machine |
 | `debounce_core` | Input debounce and `extra` counting |
 | `led_core` | LED pattern engine |
-| JSON / UTF-16 helpers | Response parsing and entity offsets |
+| `tgapi_core` | Bot API request bodies, response classification (16 KB cap, 401/404/429), UTF-16 entity offsets, retry delay |
 
 ### 1.2 Runtime model
 
@@ -67,6 +67,13 @@ scripts/         bootstrap.sh, export.sh, test_host.sh, dev-venv.sh
   7. tgbot tasks.
   8. Clear the booting flag, then set the runtime log level to WARN.
 - **Memory budget:** about 320 KB heap. Wi-Fi takes about 55 KB. Each TLS session takes 35–45 KB with dynamic buffers, ×2. The getUpdates response buffer is capped at 16 KB. Target: min free heap above 60 KB after a 24 h soak.
+  - Measured (embpet-q9h, test build, both sessions open, 1 h of long polling, getMe every 15 s, sendMessage every 10 min): min free heap 116,836 B; free heap 132–134 KB with −124 B drift; largest free block 112 KB. 8 KB worker stacks kept about 5.3 KB free.
+  - **Response caps.** A response buffer is allocated per call, sized by Content-Length, and freed after parsing, so nothing is held between calls. The default cap is 16 KB (`TG_RESP_MAX`). A getUpdates batch over the cap is fetched again with `limit` 1 under `TG_RESP_MAX_ONE` = 32 KB. One update can hold an owner reply of up to 4096 UTF-16 units that quotes a bot message of up to 4096 units.
+    - If Telegram sends non-ASCII as raw UTF-8, the worst case is 3 bytes per unit (BMP CJK): about 2 × 4096 × 3 + 1.5 KB ≈ 26 KB, which fits.
+    - If it escapes non-ASCII as `\uXXXX`, the worst case is 6 bytes per unit: about 51 KB, which does not fit. Allocating that alone would take free heap to about 40 KB while it is parsed, below the target, so this case needs another fix (e.g. a streaming filter that drops `reply_to_message.text` past its `[A]` prefix) rather than a bigger buffer.
+    - `tools/tg_test.py api` measures the bytes per unit (response size of long Cyrillic, CJK and emoji texts sent to the owner chat). That measurement is pending: no owner chat is configured yet.
+    - An update still over the cap is logged at WARN by `tgapi_get_updates_one`, and the poller skips it with `offset = first_update_id + 1` (embpet-64s).
+    - Peak heap of the limit-1 path (estimate): the body buffer (up to 32 KB) and the cJSON tree built from it exist together while parsing. cJSON copies every string, so the tree is about the body size plus about 64 B per node. A worst-case 26 KB update therefore takes about 55 KB for a moment, which brings the measured 116.8 KB minimum down to about 60 KB, right at the target. The buffer is freed right after parsing, and the TLS receive buffer has already been released by then (dynamic buffers). Verify on the device together with the escaping measurement.
 
 ### 1.3 Key data flows
 
@@ -87,7 +94,7 @@ scripts/         bootstrap.sh, export.sh, test_host.sh, dev-venv.sh
 
 | Level | What | Where |
 |---|---|---|
-| Unit (host) | All `*_core.c` modules, escape decoder, JSON and UTF-16 helpers | `test/host`, run with `scripts/test_host.sh` |
+| Unit (host) | All `*_core.c` modules, escape decoder, Bot API JSON and UTF-16 helpers (`tgapi_core`) | `test/host`, run with `scripts/test_host.sh` |
 | Device smoke | Build, flash, `sys info`, the command under test | `tools/embpet_cli.py` |
 | HIL | Protocol, io, wifi and tg suites over serial | `test/hil` (pytest, project `.venv`) |
 | Robustness | Network, host and reboot disturbances; 24 h soak | HIL plus manual disturbances |

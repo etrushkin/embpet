@@ -19,8 +19,9 @@ typedef enum {
     STATE_TG_AUTH_ERROR,
 } state_tg_state_t;
 
-#define STATE_IP_LEN  16        /* "255.255.255.255" + NUL */
-#define STATE_BOT_LEN 33        /* Telegram usernames are at most 32 chars */
+#define STATE_IP_LEN     16     /* "255.255.255.255" + NUL */
+#define STATE_BOT_LEN    33     /* Telegram usernames are at most 32 chars */
+#define STATE_DETAIL_LEN 48     /* tg detail: short human-readable reason */
 
 typedef struct {
     struct {
@@ -31,6 +32,7 @@ typedef struct {
     struct {
         state_tg_state_t state;
         char bot[STATE_BOT_LEN];
+        char detail[STATE_DETAIL_LEN];  /* reason of the latest tg change (`tg` event) */
     } tg;
     uint32_t pending;
     bool booting;               /* true from init until the end of app_main */
@@ -75,10 +77,11 @@ bool state_subscribe(state_cb_t cb, void *ctx);
 void state_get(state_snapshot_t *out);
 
 /* Setters notify subscribers only when something observable changed. For wifi that is
- * state or ip; rssi is stored silently (it would otherwise flood). `ip` and `bot` may be
- * NULL (= empty) and are truncated to fit. */
+ * state or ip; rssi is stored silently (it would otherwise flood). For tg it is state or
+ * bot; detail is stored silently, so a changing error text cannot flood either. `ip`, `bot`
+ * and `detail` may be NULL (= empty) and are truncated to fit. */
 void state_set_wifi(state_wifi_state_t state, const char *ip, int8_t rssi);
-void state_set_tg(state_tg_state_t state, const char *bot);
+void state_set_tg(state_tg_state_t state, const char *bot, const char *detail);
 void state_set_pending(uint32_t count);
 void state_set_booting(bool booting);
 void state_set_configured(bool configured);

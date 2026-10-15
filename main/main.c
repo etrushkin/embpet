@@ -6,6 +6,7 @@
 #include "io.h"
 #include "proto.h"
 #include "state.h"
+#include "tgapi.h"
 #include "wifi.h"
 
 static const char *TAG = "embpet";
@@ -56,6 +57,11 @@ void app_main(void)
     esp_err_t wifi_err = wifi_start();
     if (wifi_err != ESP_OK) {
         ESP_LOGE(TAG, "wifi_start failed: %s", esp_err_to_name(wifi_err));
+    }
+    /* Step 7: Telegram state and `tg` event (tasks follow in the bridge). */
+    esp_err_t tg_err = tgapi_init();
+    if (tg_err != ESP_OK) {
+        ESP_LOGE(TAG, "tgapi_init failed: %s", esp_err_to_name(tg_err));
     }
     state_set_booting(false);
     cmd_sys_set_log_level(ESP_LOG_WARN);

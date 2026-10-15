@@ -93,7 +93,7 @@ ESP-IDF **v5.5.x**, plain C, no Arduino. The Telegram client is the project's ow
 
 - **One owner chat.** The bot serves exactly one Telegram `chat_id`. Updates from any other chat are ignored and not answered.
 - **Binding the owner:** `tg pair` prints a 6-digit code (valid 5 min) and the owner sends `/start <code>` to the bot. Alternatively set the ID directly with `tg owner <chat_id>`.
-- **Outgoing:** `tg send -a A "text"` posts `[A] text` to the owner. The actor tag is rendered bold through Telegram `entities`, with no parse_mode, so message text needs no escaping. Plain text only, up to 4096 bytes UTF-8. Longer text is rejected (`err: too_long`).
+- **Outgoing:** `tg send -a A "text"` posts `[A] text` to the owner. The actor tag is rendered bold through Telegram `entities`, with no parse_mode, so message text needs no escaping. Plain text only, up to 4096 bytes UTF-8, and the whole message `[A] text` must also fit Telegram's limit of 4096 characters counted in UTF-16 code units (an emoji outside the BMP counts 2; the tag and its space count 3 + the actor length). Text over either limit is rejected (`err: too_long`), so with a 16-character actor at most 4077 ASCII characters fit.
 - **Threading:** `tg send -a A -r <msg_id> "text"` sends the message as a Telegram reply to an earlier message, e.g. continuing a conversation with the owner.
 - **Incoming (routing):**
   1. If the owner uses **Reply** on a bot message, the firmware looks up the replied-to `message_id` in the pending table and emits a `reply` event for that actor.
@@ -103,7 +103,8 @@ ESP-IDF **v5.5.x**, plain C, no Arduino. The Telegram client is the project's ow
 - **Receiving:** long polling `getUpdates` (timeout 50 s, `allowed_updates=["message"]`) on its own task and HTTPS connection. Sends use a second keep-alive connection. On HTTP 429 the client honours `retry_after`.
 - **Delivery semantics:** at-least-once. The getUpdates offset is confirmed only after the event has been emitted. Telegram keeps unconfirmed updates for 24 h, so replies sent while the board was off arrive after boot. A crash between emitting and confirming can produce a duplicate; hosts dedupe by the reply's `msg` id.
 - **Online notice:** after each boot, once Telegram is first reachable, the bot posts `embpet online` with firmware version and reset reason. Not sent on later reconnects.
-- **TLS:** server verification uses the IDF certificate bundle, with no pinned certificate. mbedTLS dynamic buffers are on to keep idle RAM low.
+- **TLS:** server verification uses the IDF certificate bundle, with no pinned certificate. The default common-CA bundle (`CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN`) validates `api.telegram.org` (verified on the device). mbedTLS dynamic buffers are on to keep idle RAM low.
+- **Responses** larger than 16 KB are rejected; a getUpdates batch that is too large is fetched again one update at a time with a larger cap (docs/PLAN.md 1.2). HTTP 401/404 from the Bot API mean the token was rejected (`auth_error`); on 429 the client waits `retry_after`; network errors back off 1, 2, 4, 8, 16 s, then every 30 s.
 
 ### 2.2 Status LED (GPIO8)
 
@@ -160,7 +161,7 @@ Wi-Fi SSID and password, Wi-Fi TX power, bot token, owner `chat_id`, per-pin boo
   - The first write after the host stops reading stalls the writer for the TX timeout, **40–50 ms** (IDF `TX_FLUSH_TIMEOUT_US` = 50 ms), once per close. All later writes are fast: about 0.2 ms per 70-byte line without the USB-Serial/JTAG driver, about 0.7 ms with the driver installed (as the embpet console does). Worst-case writer stall: **≈50 ms**. A same-priority task kept its 10 ms cadence during the stall (no heartbeat gap above 10 ms). A lower-priority task was not measured; on the single core it could in principle be delayed by up to the stall.
   - `usb_serial_jtag_is_connected()` follows USB start-of-frame packets, not the open state of the port: it stayed **true while the port was closed** (the cable stays enumerated), and was false on only 1 of about 7000 writes (a transient at reconnect). Do not use it to detect a listening host; it only skips writes while the cable is unplugged (the VFS write then returns -1 at once).
   - Design consequence: a single `fwrite` under the output lock holds the lock for at most about 50 ms per host stall.
-- The console also carries ESP-IDF log lines, the echoed input and the prompt. **Hosts must ignore every line that does not start with `@@`.** The console log level is `WARN` once init is done and can be changed with `sys log`.
+- The console also carries ESP-IDF log lines, the echoed input and the prompt. **Hosts must ignore every line that does not start with `@@`.** The console log level is `WARN` once init is done and can be changed with `sys log`. The HTTP client, transport and TLS log tags never go above `WARN`, whatever `sys log` says, because `esp_http_client` logs the request line, which carries the bot token, at `DEBUG`.
 - **Log lines never wait for the host:** the log sink drops whole lines while the cable is unplugged or the driver's 2 KB TX buffer is full (the host stopped reading), and counts them (`sys info` → `log_dropped`). Frames are written normally. The output that fills the buffer can still pay the one 40–50 ms stall above. Measured with a soak build (an event and a log line every 100 ms, port closed for 10 min): longest event write 51 ms, longest log write 49 ms, the generator's 100 ms loop never late, and `evt since` worked after reopening.
 
 ### 3.2 Host → FW: plain commands
@@ -201,7 +202,7 @@ Error codes (`err`), with a human-readable `msg` alongside:
 |---|---|
 | `bad_args` | Unknown command, unknown or missing option or argument, invalid `-a`/`-i` value, bad quoting or escape, value out of range |
 | `bad_pin` | Pin number isn't valid for this operation (e.g. not an output) |
-| `too_long` | Command line over 4400 bytes, or text over its limit (4096 bytes for `tg send`) |
+| `too_long` | Command line over 4400 bytes, or text over its limit (`tg send`: 4096 bytes, and 4096 UTF-16 code units for the whole `[A] text`) |
 | `offline` | Wi-Fi or Telegram is down |
 | `not_configured` | Required setting missing (Wi-Fi credentials, bot token, owner) |
 | `auth_error` | Telegram rejected the bot token |
@@ -217,7 +218,7 @@ The `cmd` of an unknown command echoes the typed command words (e.g. `"sys nope"
 |---|---|---|
 | `boot` | `fw`, `idf`, `reset_reason` | Once after start |
 | `wifi` | `state` (`up`/`down`), `ip`, `rssi` (`ip` and `rssi` only when `up`) | Wi-Fi goes up or down, or the IP changes; not on every reconnect attempt |
-| `tg` | `state` (`online`/`offline`/`unconfigured`/`auth_error`), `detail` | Telegram reachability changes |
+| `tg` | `state` (`online`/`offline`/`unconfigured`/`auth_error`), `detail` | Telegram reachability changes (state, or the bot behind the token). `detail` is a short reason for humans, e.g. `@<bot>`, `wifi down`, `token changed`, `timeout`, `network: <error>`, `server error 502`, `401 Unauthorized`, `no token` |
 | `reply` | `actor`, `to` (msg_id replied to), `msg` (owner's msg_id), `text`, `date` (unix), `src` (`table`/`prefix`) | Owner replied to an actor's message |
 | `paired` | `chat_id` | Owner bound with `/start <code>` |
 | `pending` | `count` | Unanswered count changed |
@@ -347,6 +348,8 @@ tools/embpet/         Python library: reset-free serial open, @@ frame parser, q
 tools/embpet_cli.py   send one command, print the matching @@ response (`CMD [ARG ...] [-- TEXT ...]`: words after `--` may start with `-`); --listen SEC prints evt frames; --monitor SEC [--reset] dumps raw console output
 tools/console_test.py device tests of the console: functional, soak (port closed), reopen (no reset on open)
 tools/hil.py          run test/hil (pytest, project .venv) -- use `scripts/hw.sh python tools/hil.py -k smoke`
+tools/tg_from_env.py  store TG_TOKEN from .env.local on the board in-process (never in argv, never printed)
+tools/tg_test.py      device tests of the Bot API client (test build, components/tgbot/tgtest.defaults): api, soak
 test/hil/             hardware-in-the-loop pytest suite; skips when no board is attached
 scripts/dev-venv.sh   create the git-ignored .venv (ESP-IDF interpreter + pyserial + pytest)
 scripts/bootstrap.sh  install a self-contained ESP-IDF into a given root

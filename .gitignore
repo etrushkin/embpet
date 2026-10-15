@@ -17,6 +17,7 @@ __pycache__/
 build/
 build-host/
 build-*/
+build-*.log
 sdkconfig
 sdkconfig.old
 managed_components/

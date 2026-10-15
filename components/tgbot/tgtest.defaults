@@ -1,0 +1,5 @@
+# Test build for tools/tg_test.py: Bot API client test commands. Never flash this to a
+# deployed board.
+#   scripts/idf.sh idf.py -B build-tgtest -D SDKCONFIG=build-tgtest/sdkconfig \
+#       -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;components/tgbot/tgtest.defaults" build
+CONFIG_EMBPET_TG_TEST=y
