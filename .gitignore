@@ -8,6 +8,11 @@
 # Local secrets (Wi-Fi, Telegram token)
 .env.local
 
+# Dev Python env (scripts/dev-venv.sh) and pytest caches
+.venv/
+.pytest_cache/
+__pycache__/
+
 # ESP-IDF build output
 build/
 build-host/
