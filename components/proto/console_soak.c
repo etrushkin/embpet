@@ -2,9 +2,10 @@
  * one "soak" event and one WARN log line. Each event carries the longest proto_evt() call,
  * ESP_LOGW() call and loop period seen since uptime SETTLE_S, so after the host port was
  * closed a reconnecting host can tell from `evt since` whether output ever stalled the
- * firmware. Before SETTLE_S there is a boot-time stall of up to about 0.35 s with either
- * output path, cause not yet isolated (embpet-s2j.5); the maxima of that window are kept
- * apart as boot_max_*, and `settled` says whether the window is over. */
+ * firmware. Before SETTLE_S the Wi-Fi driver task (priority 23) stalls this task for about
+ * 0.3 s at a time while it computes the WPA3-SAE handshake (README 3.1, embpet-s2j.5); the
+ * maxima of that window are kept apart as boot_max_*, and `settled` says whether the window
+ * is over. */
 #include <inttypes.h>
 
 #include "esp_log.h"
@@ -69,5 +70,8 @@ static void soak_task(void *arg)
 
 void console_soak_start(void)
 {
+#ifdef CONFIG_EMBPET_BOOT_TRACE
+    boot_trace_start();
+#endif
     xTaskCreate(soak_task, "soak", 3072, NULL, 5, NULL);
 }

@@ -17,6 +17,17 @@ menu "embpet proto"
             seen since uptime 15 s, so a host can show the firmware kept running
             while the port was closed. Host side: tools/console_test.py soak.
 
+    config EMBPET_BOOT_TRACE
+        bool "Boot stall trace (never enable in production)"
+        default n
+        depends on EMBPET_CONSOLE_SOAK && FREERTOS_GENERATE_RUN_TIME_STATS
+        help
+            Records late wake-ups of a priority-5 and a priority-24 task, late
+            esp_timer callbacks, per-task CPU, and the timing of PHY
+            calibration, the WPA PMK derivation, flash erase/write, TLS
+            handshakes and Wi-Fi events until uptime 20 s; `trace` returns
+            the records (embpet-s2j.5, tools/boot_trace.py).
+
     config EMBPET_CONSOLE_PROBE
         bool "Console CPU probe commands (never enable in production)"
         default n

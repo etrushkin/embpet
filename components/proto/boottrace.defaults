@@ -1,0 +1,6 @@
+# Extra sdkconfig defaults for the boot stall trace build (embpet-s2j.5, tools/boot_trace.py):
+#   -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;components/proto/boottrace.defaults"
+CONFIG_EMBPET_CONSOLE_SOAK=y
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_EMBPET_BOOT_TRACE=y

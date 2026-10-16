@@ -8,6 +8,10 @@
 /* Start the soak generator task (console_soak.c, CONFIG_EMBPET_CONSOLE_SOAK only). */
 void console_soak_start(void);
 
+/* Start the boot stall trace and register `trace` (boot_trace.c, CONFIG_EMBPET_BOOT_TRACE
+ * only; called by console_soak_start). */
+void boot_trace_start(void);
+
 /* Register `probe cpu` and `probe nop` (console_probe.c, CONFIG_EMBPET_CONSOLE_PROBE only). */
 void console_probe_register(void);
 
