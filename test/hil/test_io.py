@@ -115,13 +115,18 @@ def test_pulse_default_duration_is_100_ms(board, pin_off):
 
 def test_remaining_ms_counts_down_in_real_time(board, pin_off):
     board.cmd("io pulse", str(P), "-d", "4000")
-    t1 = time.monotonic()
+    # The board samples remaining_ms somewhere inside each request's round trip, which a
+    # console stall (e.g. a WPA3-SAE step after boot, about 0.3 s) can stretch: compare the
+    # board's countdown with the host window around both samples (embpet-jk5.4).
+    a1 = time.monotonic()
     r1 = get_pin(board, P)["remaining_ms"]
+    b1 = time.monotonic()
     time.sleep(1.0)
-    t2 = time.monotonic()
+    a2 = time.monotonic()
     r2 = get_pin(board, P)["remaining_ms"]
-    elapsed_ms = (t2 - t1) * 1000
-    assert abs((r1 - r2) - elapsed_ms) <= 250
+    b2 = time.monotonic()
+    shortest, longest = (a2 - b1) * 1000, (b2 - a1) * 1000
+    assert shortest - 50 <= r1 - r2 <= longest + 50, (r1 - r2, shortest, longest)
 
 
 def test_pulse_ends_after_its_duration_and_restores_off(board, pin_off):
