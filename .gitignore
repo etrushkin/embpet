@@ -22,6 +22,9 @@ sdkconfig
 sdkconfig.old
 managed_components/
 
+# clangd index cache (editor/LSP)
+.cache/
+
 # Permission-prompt log written by .claude/hooks/permission-gate.sh
 PERMISSIONS.md
 

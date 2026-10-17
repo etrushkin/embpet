@@ -2,8 +2,8 @@
  * tools/boot_trace.py). Started from the soak generator, records until uptime TRACE_END_S:
  *  - gap5 / gap24   a priority-5 / priority-24 task that sleeps one tick woke late
  *                   (gap24 = interrupts or the scheduler were off, not just a busy task)
- *  - timer          a 10 ms periodic esp_timer callback came late (the pulse, debounce and
- *                   LED timers run on the same esp_timer task)
+ *  - timer          a 10 ms periodic esp_timer callback came late (the LED timer and the
+ *                   `input` event drain run on the same esp_timer task)
  *  - cpu            a task used more than CPU_REC_US of a ~50 ms window (run-time counters)
  *  - phy, pbkdf2, erase, write, tls, wifi_init, wifi_start: start and duration of
  *                   register_chipv7_phy (PHY calibration), the WPA PMK derivation, flash

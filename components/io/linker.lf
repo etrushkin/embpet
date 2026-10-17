@@ -1,0 +1,8 @@
+# The core functions that the ISR-dispatched pulse and debounce timers call run while the
+# flash cache may be off (io_out.c, io_in.c), so they go to IRAM. The core files stay free
+# of ESP-IDF headers; the placement lives here.
+[mapping:io]
+archive: libio.a
+entries:
+    pulse_core:pulse_expire (noflash)
+    debounce_core:deb_settle (noflash)

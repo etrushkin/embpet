@@ -14,6 +14,8 @@
 #include "argtable3/argtable3.h"
 #include "console.h"
 #include "driver/gpio.h"
+#include "esp_attr.h"
+#include "esp_intr_alloc.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -36,7 +38,8 @@ static volatile uint32_t s_head;        /* written by the ISR only */
 static volatile uint32_t s_tail;        /* written by the console task only */
 static volatile uint32_t s_dropped;
 
-static void edge_isr(void *arg)
+/* In IRAM: the GPIO ISR service is IRAM-safe (io_in.c), so every handler on it must be. */
+static void IRAM_ATTR edge_isr(void *arg)
 {
     uint32_t h = s_head;
     if (h - s_tail >= EDGE_RING) {
@@ -253,7 +256,7 @@ static const console_cmd_t s_t_stat = {
 
 void io_test_register(void)
 {
-    esp_err_t err = gpio_install_isr_service(0);
+    esp_err_t err = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         ESP_ERROR_CHECK(err);
     }

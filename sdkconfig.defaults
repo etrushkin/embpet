@@ -13,6 +13,13 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 # must stay in IRAM-safe code.
 CONFIG_ESP_TIMER_IN_IRAM=y
 
+# Pulse ends and debounce expiry are dispatched from the esp_timer interrupt (ESP_TIMER_ISR),
+# so they stay on time while the Wi-Fi driver task computes WPA3-SAE (embpet-jk5.1). Those
+# callbacks and the input ISR also run with the flash cache off, so gpio_set_level and
+# gpio_get_level must be in IRAM.
+CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD=y
+CONFIG_GPIO_CTRL_FUNC_IN_IRAM=y
+
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
