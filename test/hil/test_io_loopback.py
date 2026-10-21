@@ -5,9 +5,9 @@ Skipped unless asked for:
     scripts/hw.sh python tools/hil.py -m loopback          (or EMBPET_HIL_LOOPBACK=1)
 
 Wiring: output OUTn drives the field side of the input's opto, so that `io set n on` makes the
-input active (README 1.3). The pairs are OUT:IN in $EMBPET_LOOPBACK, default "0:10,1:20,2:21"
-(OUT0 -> IN10, OUT1 -> IN20, OUT2 -> IN21; physically GPIO4 -> IN10, GPIO3 -> IN20,
-GPIO2 -> IN21, see the README 1.2 pin map). Each pair is tested separately. Output levels and
+input active (README 1.3). The pairs are OUT:IN in $EMBPET_LOOPBACK, default "0:0,1:1,2:2"
+(OUT0 -> IN0, OUT1 -> IN1, OUT2 -> IN2; physically GPIO4 -> GPIO10, GPIO3 -> GPIO20,
+GPIO2 -> GPIO21, see the README 1.2 pin map). Each pair is tested separately. Output levels and
 debounce times are restored afterwards.
 """
 import os
@@ -19,7 +19,7 @@ pytestmark = [pytest.mark.loopback, pytest.mark.usefixtures("restore_io_state")]
 
 
 def pairs():
-    spec = os.environ.get("EMBPET_LOOPBACK", "0:10,1:20,2:21")
+    spec = os.environ.get("EMBPET_LOOPBACK", "0:0,1:1,2:2")
     return [tuple(int(x) for x in p.split(":")) for p in spec.split(",") if p]
 
 

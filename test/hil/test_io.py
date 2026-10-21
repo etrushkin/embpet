@@ -275,7 +275,7 @@ def test_boot_levels_apply_after_reboot_and_runtime_levels_do_not(board, board_g
 def test_io_in_lists_the_three_inputs_with_their_fields(board):
     res = board.cmd("io in")
     assert res["ok"] is True
-    assert [i["pin"] for i in res["in"]] == [10, 20, 21]
+    assert [i["pin"] for i in res["in"]] == [0, 1, 2]
     for i in res["in"]:
         assert i["active"] in (0, 1)
         assert i["level"] in (0, 1)
@@ -285,33 +285,35 @@ def test_io_in_lists_the_three_inputs_with_their_fields(board):
 def test_io_debounce_lists_the_three_times(board):
     res = board.cmd("io debounce")
     assert res["ok"] is True
-    assert sorted(res["debounce"], key=int) == ["10", "20", "21"]
+    assert sorted(res["debounce"], key=int) == ["0", "1", "2"]
     assert all(0 <= ms <= 1000 for ms in res["debounce"].values())
 
 
 def test_io_debounce_set_is_reported_and_only_changes_that_pin(board, board_guard):
     before = board_guard["debounce"]
-    res = board.cmd("io debounce", "20", "123")
+    res = board.cmd("io debounce", "1", "123")
     assert res["ok"] is True
     after = board.cmd("io debounce")["debounce"]
-    assert after["20"] == 123
-    assert {k: v for k, v in after.items() if k != "20"} == {k: v for k, v in before.items()
-                                                             if k != "20"}
+    assert after["1"] == 123
+    assert {k: v for k, v in after.items() if k != "1"} == {k: v for k, v in before.items()
+                                                            if k != "1"}
 
 
 @pytest.mark.parametrize("ms", ["0", "1000"])
 def test_io_debounce_accepts_the_range_limits(board, ms):
-    assert board.cmd("io debounce", "10", ms)["ok"] is True
-    assert board.cmd("io debounce")["debounce"]["10"] == int(ms)
+    assert board.cmd("io debounce", "0", ms)["ok"] is True
+    assert board.cmd("io debounce")["debounce"]["0"] == int(ms)
 
 
 @pytest.mark.parametrize("args,err", [
+    (("3", "5"), "bad_pin"),
     (("9", "5"), "bad_pin"),
-    (("0", "5"), "bad_pin"),
-    (("22", "5"), "bad_pin"),
-    (("10",), "bad_args"),
-    (("10", "1001"), "bad_args"),
-    (("10", "x"), "bad_args"),
+    (("10", "5"), "bad_pin"),
+    (("20", "5"), "bad_pin"),
+    (("21", "5"), "bad_pin"),
+    (("0",), "bad_args"),
+    (("0", "1001"), "bad_args"),
+    (("0", "x"), "bad_args"),
 ])
 def test_io_debounce_rejects_bad_input(board, args, err):
     res = board.cmd("io debounce", *args)
@@ -319,8 +321,14 @@ def test_io_debounce_rejects_bad_input(board, args, err):
     assert res["err"] == err
 
 
+def test_io_debounce_with_negative_pin_is_bad_args(board):
+    res = board.cmd("io debounce", "-1", "5")
+    assert res["ok"] is False
+    assert res["err"] == "bad_args"
+
+
 @pytest.mark.slow
 def test_debounce_survives_a_reboot(board, board_guard):
-    board.cmd("io debounce", "21", "77")
+    board.cmd("io debounce", "2", "77")
     U.reboot(board)
-    assert board.cmd("io debounce")["debounce"]["21"] == 77
+    assert board.cmd("io debounce")["debounce"]["2"] == 77

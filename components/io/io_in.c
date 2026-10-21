@@ -1,4 +1,5 @@
-/* Inputs GPIO10/20/21 behind PC817 optos: opto on = pin low = active (README 2.3).
+/* Inputs IN0..IN2 on GPIO10/20/21 (io_in_gpio_tab) behind PC817 optos: opto on = pin low =
+ * active (README 2.3).
  *
  * The any-edge ISR only counts the edge and (re)arms the pin's debounce esp_timer, no more
  * often than once per ms so an edge storm cannot keep the CPU in timer bookkeeping (it keeps
@@ -41,7 +42,8 @@
 #define EVT_QUEUE_LEN 32                /* decisions waiting for the esp_timer task */
 
 typedef struct {
-    int pin;
+    int idx;                            /* logical input number, as in events and replies */
+    int gpio;
     esp_timer_handle_t timer;
     atomic_uint raw;                    /* raw edges, written by the ISR */
     volatile uint32_t deb_us;           /* debounce time, read by the ISR */
@@ -56,20 +58,12 @@ typedef struct {
     uint32_t extra;
 } in_evt_t;
 
-static in_pin_t s_in[IO_IN_COUNT] = {{.pin = 10}, {.pin = 20}, {.pin = 21}};
+const DRAM_ATTR uint8_t io_in_gpio_tab[IO_IN_COUNT] = {10, 20, 21};
+
+static in_pin_t s_in[IO_IN_COUNT];
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static QueueHandle_t s_evtq;
 static esp_timer_handle_t s_evt_timer;  /* task-dispatched: drains s_evtq */
-
-int io_in_index(int pin)
-{
-    for (int k = 0; k < IO_IN_COUNT; k++) {
-        if (s_in[k].pin == pin) {
-            return k;
-        }
-    }
-    return -1;
-}
 
 static void IRAM_ATTR arm(in_pin_t *p, uint32_t us)
 {
@@ -99,7 +93,7 @@ static void IRAM_ATTR debounce_cb(void *arg)
     /* Count first, then sample: an edge in between is then counted by the next event
      * instead of being attributed to this one with a stale level. */
     uint32_t raw = atomic_load_explicit(&p->raw, memory_order_relaxed);
-    in_evt_t e = {.pin = (uint8_t)p->pin, .active = gpio_get_level((gpio_num_t)p->pin) == 0};
+    in_evt_t e = {.pin = (uint8_t)p->idx, .active = gpio_get_level((gpio_num_t)p->gpio) == 0};
     /* Only this interrupt fills the queue, so room seen here is still there below. */
     bool full = xQueueIsQueueFullFromISR(s_evtq) != pdFALSE;
     bool changed = false;
@@ -167,6 +161,8 @@ void io_inputs_init(void)
     }
     for (int k = 0; k < IO_IN_COUNT; k++) {
         in_pin_t *p = &s_in[k];
+        p->idx = k;
+        p->gpio = io_in_gpio(k);
         const esp_timer_create_args_t a = {
             .callback = debounce_cb,
             .arg = p,
@@ -174,33 +170,33 @@ void io_inputs_init(void)
             .name = "debounce",
         };
         ESP_ERROR_CHECK(esp_timer_create(&a, &p->timer));
-        p->deb_us = (uint32_t)cfg_get_debounce(p->pin) * 1000u;
+        p->deb_us = (uint32_t)cfg_get_debounce(p->gpio) * 1000u;
 #ifdef CONFIG_EMBPET_IO_TEST
         /* Open-drain with the pull-up: the test drives the pin low itself, like a jumper
          * to GND, and releases it to let the pull-up take it high. */
-        gpio_set_level((gpio_num_t)p->pin, 1);
+        gpio_set_level((gpio_num_t)p->gpio, 1);
         const gpio_mode_t mode = GPIO_MODE_INPUT_OUTPUT_OD;
 #else
         const gpio_mode_t mode = GPIO_MODE_INPUT;
 #endif
         const gpio_config_t c = {
-            .pin_bit_mask = 1ULL << p->pin,
+            .pin_bit_mask = 1ULL << p->gpio,
             .mode = mode,
             .pull_up_en = GPIO_PULLUP_ENABLE,
             .pull_down_en = GPIO_PULLDOWN_DISABLE,
             .intr_type = GPIO_INTR_ANYEDGE,
         };
         ESP_ERROR_CHECK(gpio_config(&c));
-        deb_init(&p->d, gpio_get_level((gpio_num_t)p->pin) == 0, 0);
-        ESP_ERROR_CHECK(gpio_isr_handler_add((gpio_num_t)p->pin, in_isr, p));
+        deb_init(&p->d, gpio_get_level((gpio_num_t)p->gpio) == 0, 0);
+        ESP_ERROR_CHECK(gpio_isr_handler_add((gpio_num_t)p->gpio, in_isr, p));
     }
 }
 
 void io_in_get(int idx, io_in_state_t *st)
 {
     in_pin_t *p = &s_in[idx];
-    st->pin = p->pin;
-    st->level = gpio_get_level((gpio_num_t)p->pin);
+    st->pin = p->idx;
+    st->level = gpio_get_level((gpio_num_t)p->gpio);
     uint32_t raw = atomic_load_explicit(&p->raw, memory_order_relaxed);
     portENTER_CRITICAL(&s_lock);
     st->active = p->d.active;
@@ -215,7 +211,7 @@ uint32_t io_in_debounce_ms(int idx)
 
 esp_err_t io_in_set_debounce(int idx, int ms)
 {
-    esp_err_t err = cfg_set_debounce(s_in[idx].pin, ms);
+    esp_err_t err = cfg_set_debounce(s_in[idx].gpio, ms);
     if (err == ESP_OK) {
         s_in[idx].deb_us = (uint32_t)ms * 1000u;
     }

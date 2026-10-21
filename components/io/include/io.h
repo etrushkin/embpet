@@ -43,10 +43,19 @@ void io_out_toggle(int pin, io_out_state_t *st);
 esp_err_t io_out_pulse(int pin, uint32_t ms, io_out_state_t *st);
 void io_out_get(int pin, io_out_state_t *st);
 
-#define IO_IN_COUNT 3                   /* inputs on GPIO10, GPIO20, GPIO21 */
+#define IO_IN_COUNT 3                   /* IN0..IN2 on GPIO10, GPIO20, GPIO21 (README 1.2) */
+
+/* GPIO number of logical input n (0..IO_IN_COUNT-1, the caller validates); the one place
+ * the wiring is defined. Read at init and by the test build; kept in DRAM (io_in.c) with an
+ * always-inline accessor like io_out_gpio_tab, so ISR code may use it too. */
+extern const uint8_t io_in_gpio_tab[IO_IN_COUNT];
+FORCE_INLINE_ATTR int io_in_gpio(int n)
+{
+    return io_in_gpio_tab[n];
+}
 
 typedef struct {
-    int pin;
+    int pin;                            /* logical input number */
     bool active;                        /* debounced: opto energised = pin low */
     int level;                          /* raw pin level now */
     uint32_t extra;                     /* raw edges since the last `input` event */
@@ -56,11 +65,10 @@ typedef struct {
  * reporting `input` events. Needs cfg_init() and proto_init() to have run. */
 void io_inputs_init(void);
 
-/* Index 0..IO_IN_COUNT-1 of an input GPIO number (10, 20, 21), or -1. */
-int io_in_index(int pin);
+/* idx is the logical input number 0..IO_IN_COUNT-1 (the caller validates). */
 void io_in_get(int idx, io_in_state_t *st);
 uint32_t io_in_debounce_ms(int idx);
-/* Store (NVS) and apply a new debounce time, 0..1000 ms. */
+/* Store (NVS, keyed by the input's GPIO) and apply a new debounce time, 0..1000 ms. */
 esp_err_t io_in_set_debounce(int idx, int ms);
 
 /* Register the io console commands (io_cmd.c). Call before console_start(). */

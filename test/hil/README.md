@@ -50,7 +50,7 @@ embpet-vgj) and not implemented.
 
 Skipped unless `-m loopback` or `EMBPET_HIL_LOOPBACK=1`. Wire each output so that `io set n on`
 energises an input's opto (README 1.3). Pairs are `OUT:IN` in `EMBPET_LOOPBACK`, default
-`0:10,1:20,2:21` (logical outputs; GPIO4 -> IN10, GPIO3 -> IN20, GPIO2 -> IN21). Covers
+`0:0,1:1,2:2` (logical numbers; GPIO4 -> GPIO10, GPIO3 -> GPIO20, GPIO2 -> GPIO21). Covers
 press/release events, `io in`, a timed pulse, a pulse shorter than the debounce time (no event, counted in `extra`), debounce 0, and `evt since` reporting
 `truncated: true` after more than 32 events (this is the only production-firmware check of
 that flag; the ring logic itself has host tests).

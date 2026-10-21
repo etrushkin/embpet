@@ -14,7 +14,7 @@ import wifi_from_env as W  # noqa: E402
 ROOT = W.ROOT
 ENV_FILE = os.path.join(ROOT, ".env.local")
 OUT_PINS = tuple(range(8))
-IN_PINS = (10, 20, 21)
+IN_PINS = (0, 1, 2)
 FRAME_RE = re.compile(r"^@@(\{.*\})\r?$")
 
 

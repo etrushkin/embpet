@@ -298,8 +298,7 @@ static void io_debounce(console_req_t *req)
         return;
     }
     int pin = s_deb_pin->ival[0];
-    int idx = io_in_index(pin);
-    if (idx < 0) {
+    if (pin < 0 || pin >= IO_IN_COUNT) {
         char msg[48];
         snprintf(msg, sizeof(msg), "pin %d is not an input", pin);
         console_err(req, CONSOLE_ERR_BAD_PIN, msg);
@@ -314,7 +313,7 @@ static void io_debounce(console_req_t *req)
         console_err(req, CONSOLE_ERR_BAD_ARGS, "debounce must be 0..1000 ms");
         return;
     }
-    if (io_in_set_debounce(idx, ms) != ESP_OK) {
+    if (io_in_set_debounce(pin, ms) != ESP_OK) {
         console_err(req, CONSOLE_ERR_INTERNAL, "cannot store debounce time");
         return;
     }
@@ -323,7 +322,7 @@ static void io_debounce(console_req_t *req)
 
 static const console_cmd_t s_io_debounce = {
     .name = "io debounce",
-    .help = "Show, or set for one input (pin 10, 20, 21), the debounce time in ms (0-1000)",
+    .help = "Show, or set for one input (pin 0-2), the debounce time in ms (0-1000)",
     .args = s_deb_args,
     .handler = io_debounce,
 };
@@ -336,7 +335,7 @@ void io_register_cmds(void)
     s_pulse_ms = arg_int0("d", NULL, "<ms>", "pulse length in ms (default 100)");
     s_boot_pin = arg_int0(NULL, NULL, "<pin>", "output 0-7");
     s_boot_level = arg_str0(NULL, NULL, "<on|off>", "level at app start");
-    s_deb_pin = arg_int0(NULL, NULL, "<pin>", "input 10, 20 or 21");
+    s_deb_pin = arg_int0(NULL, NULL, "<pin>", "input 0-2");
     s_deb_ms = arg_int0(NULL, NULL, "<ms>", "0-1000");
     if (s_set_pin == NULL || s_set_level == NULL || s_pulse_pin == NULL ||
         s_pulse_ms == NULL || s_boot_pin == NULL || s_boot_level == NULL ||

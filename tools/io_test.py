@@ -101,7 +101,7 @@ def outputs(port):
             ("io set 8 on", "bad_pin", "set pin 8 is not an output"),
             ("io set 9 on", "bad_pin", "set pin 9"),
             ("io set -1 on", "bad_args", "set pin -1 (looks like an option)"),
-            ("io set 10 on", "bad_pin", "set pin 10 (input)"),
+            ("io set 10 on", "bad_pin", "set pin 10 (out of range)"),
             ("io pulse 20", "bad_pin", "pulse pin 20"),
             ("io boot 21 on", "bad_pin", "boot pin 21"),
             ("io set 1 maybe", "bad_args", "set bad level"),
@@ -286,134 +286,135 @@ def inputs(port):
         return c, info
 
     # debounce setting: show, set, errors
-    for p in (10, 20, 21):
+    for p in (0, 1, 2):
         d.cmd("io debounce %d 20" % p)
     f = d.cmd("io debounce")
     c.check("io debounce lists the three inputs",
-            f and f.get("debounce") == {"10": 20, "20": 20, "21": 20}, f)
-    for line, err, name in [("io debounce 9 5", "bad_pin", "pin 9"),
-                            ("io debounce 0 5", "bad_pin", "pin 0 (an output)"),
-                            ("io debounce 22 5", "bad_pin", "pin 22"),
-                            ("io debounce 10", "bad_args", "pin without ms"),
-                            ("io debounce 10 1001", "bad_args", "ms 1001"),
-                            ("io debounce 10 x", "bad_args", "ms not a number")]:
+            f and f.get("debounce") == {"0": 20, "1": 20, "2": 20}, f)
+    for line, err, name in [("io debounce 3 5", "bad_pin", "pin 3"),
+                            ("io debounce 10 5", "bad_pin", "pin 10 (a GPIO number)"),
+                            ("io debounce 21 5", "bad_pin", "pin 21 (a GPIO number)"),
+                            ("io debounce 0", "bad_args", "pin without ms"),
+                            ("io debounce 0 1001", "bad_args", "ms 1001"),
+                            ("io debounce 0 x", "bad_args", "ms not a number")]:
         f = d.cmd(line)
         c.check("error: " + name, f and f.get("ok") is False and f.get("err") == err, f)
-    f = d.cmd("io debounce 10 -1")
+    f = d.cmd("io debounce 0 -1")
     c.check("error: ms -1", f and f.get("ok") is False and f.get("err") == "bad_args", f)
 
     g = in_state(d)
     c.check("io in: three inputs, released (pull-up), active 0, extra 0",
-            sorted(g) == [10, 20, 21] and all(o["active"] == 0 and o["level"] == 1
-                                              and o["extra"] == 0 for o in g.values()), g)
+            sorted(g) == [0, 1, 2] and all(o["active"] == 0 and o["level"] == 1
+                                           and o["extra"] == 0 for o in g.values()), g)
 
     # debounce 20 ms
-    f, ev = drive(d, 10, "L1000")
+    f, ev = drive(d, 0, "L1000")
     c.check("clean press: one event, active 1, extra 0", ex(ev) == [(1, 0)] and f["level"] == 0,
             [f, ev])
-    g = in_state(d)[10]
+    g = in_state(d)[0]
     c.check("io in after press: active 1, level 0, extra 0",
             (g["active"], g["level"], g["extra"]) == (1, 0, 0), g)
-    f, ev = drive(d, 10, "H1000")
+    f, ev = drive(d, 0, "H1000")
     c.check("clean release: one event, active 0, extra 0", ex(ev) == [(0, 0)], ev)
     c.check("input event has pin/active/extra and the common fields",
             ev and all(k in ev[0] for k in ("t", "seq", "boot", "ev", "pin", "active", "extra")),
             ev)
 
-    f, ev = drive(d, 10, "L200H200L200H200L200")
+    f, ev = drive(d, 0, "L200H200L200H200L200")
     c.check("5-edge bounce press: ONE event, extra 4", ex(ev) == [(1, 4)], ev)
-    f, ev = drive(d, 10, "H200L200H200L200H200")
+    f, ev = drive(d, 0, "H200L200H200L200H200")
     c.check("5-edge bounce release: ONE event, extra 4", ex(ev) == [(0, 4)], ev)
-    f, ev = drive(d, 10, "L200H200L200H200")
+    f, ev = drive(d, 0, "L200H200L200H200")
     c.check("4-edge bounce that ends released: no event", ev == [], ev)
-    g = in_state(d)[10]
+    g = in_state(d)[0]
     c.check("io in: 4 pending edges, still inactive", (g["active"], g["extra"]) == (0, 4), g)
-    f, ev = drive(d, 10, "L1000")
+    f, ev = drive(d, 0, "L1000")
     c.check("press after the glitch: extra includes the 4 glitch edges",
             ex(ev) == [(1, 4)], ev)
-    drive(d, 10, "H1000")
+    drive(d, 0, "H1000")
 
-    f, ev = drive(d, 10, "L300H1000")
+    f, ev = drive(d, 0, "L300H1000")
     c.check("glitch shorter than the debounce: no event", ev == [], ev)
-    g = in_state(d)[10]
+    g = in_state(d)[0]
     c.check("io in after glitch: inactive, extra 2", (g["active"], g["extra"]) == (0, 2), g)
-    f, ev = drive(d, 10, "L1000")
+    f, ev = drive(d, 0, "L1000")
     c.check("change after a glitch: extra 2 (the glitch edges)", ex(ev) == [(1, 2)], ev)
-    f, ev = drive(d, 10, "H1000")
+    f, ev = drive(d, 0, "H1000")
     c.check("next event is per-event, extra back to 0", ex(ev) == [(0, 0)], ev)
 
     # press shorter than the debounce time vs. a long one
-    f, ev = drive(d, 10, "L10000H1000")
+    f, ev = drive(d, 0, "L10000H1000")
     c.check("press shorter than 20 ms (10 ms): no event", ev == [], ev)
-    d.cmd("io debounce 10 100")
-    f, ev = drive(d, 10, "L50000H1000", wait=0.4)
+    d.cmd("io debounce 0 100")
+    f, ev = drive(d, 0, "L50000H1000", wait=0.4)
     c.check("debounce 100: a 50 ms press is ignored", ev == [], ev)
-    f, ev = drive(d, 10, "L200000", wait=0.5)
+    f, ev = drive(d, 0, "L200000", wait=0.5)
     c.check("debounce 100: a 200 ms press is reported, extra = the 4 edges of the two "
             "ignored pulses", ex(ev) == [(1, 4)], ev)
-    drive(d, 10, "H1000", wait=0.4)
-    d.cmd("io debounce 10 20")
+    drive(d, 0, "H1000", wait=0.4)
+    d.cmd("io debounce 0 20")
 
     # edge storm: 201 edges in about 20 ms; the ISR re-arms at most once per ms
-    f, ev = drive(d, 10, "L100H100" * 100 + "L100")
+    f, ev = drive(d, 0, "L100H100" * 100 + "L100")
     c.check("edge storm (201 edges in 20 ms): one event, extra 200",
             ex(ev) == [(1, 200)], ev)
     f = d.cmd("io in")
     c.check("console still answers after the storm", f and f.get("ok"), f)
-    drive(d, 10, "H1000")
+    drive(d, 0, "H1000")
 
     # debounce 0
-    d.cmd("io debounce 10 0")
-    f, ev = drive(d, 10, "L1000")
+    d.cmd("io debounce 0 0")
+    f, ev = drive(d, 0, "L1000")
     c.check("debounce 0: clean press is reported at once, extra 0", ex(ev) == [(1, 0)], ev)
-    drive(d, 10, "H1000")
+    drive(d, 0, "H1000")
     i0 = len(d.b.frames)
-    drive(d, 10, "L500H500L500H500L500")
-    ev = input_events(d, i0, 10)
-    pend = in_state(d)[10]["extra"]
+    drive(d, 0, "L500H500L500H500L500")
+    ev = input_events(d, i0, 0)
+    pend = in_state(d)[0]["extra"]
     c.check("debounce 0, 5 slow edges: edges conserved (sum(extra+1) + pending == 5)",
             sum(e["extra"] + 1 for e in ev) + pend == 5 and ev and ev[-1]["active"] == 1,
             [ex(ev), pend])
     info["debounce0_slow_bounce"] = ex(ev)
-    drive(d, 10, "H1000")
-    f, ev = drive(d, 10, "L100H100L100H100L100")
+    drive(d, 0, "H1000")
+    f, ev = drive(d, 0, "L100H100L100H100L100")
     c.check("debounce 0: 5-edge bounce inside 1 ms folds into ONE event, extra 4",
             ex(ev) == [(1, 4)], ev)
-    drive(d, 10, "H1000")
+    drive(d, 0, "H1000")
     i0 = len(d.b.frames)
-    drive(d, 10, "L10H10L10H10L10H10L10H10L10")
-    ev = input_events(d, i0, 10)
-    g = in_state(d)[10]
+    drive(d, 0, "L10H10L10H10L10H10L10H10L10")
+    ev = input_events(d, i0, 0)
+    g = in_state(d)[0]
     c.check("debounce 0, fast bounce: settles on the real level, edges counted",
             ev and ev[-1]["active"] == 1 and g["active"] == 1
             and sum(e["extra"] + 1 for e in ev) + g["extra"] >= 1, [ex(ev), g])
     info["debounce0_fast_bounce"] = ex(ev)
-    drive(d, 10, "H1000")
+    drive(d, 0, "H1000")
     i0 = len(d.b.frames)                    # about 1 us apart: edges merge in the GPIO latch
-    drive(d, 10, "L1H1L1H1L1H1L1H1L1")
-    ev = input_events(d, i0, 10)
-    info["debounce0_1us_bounce"] = {"events": ex(ev), "pending": in_state(d)[10]["extra"]}
-    drive(d, 10, "H1000")
-    d.cmd("io debounce 10 20")
+    drive(d, 0, "L1H1L1H1L1H1L1H1L1")
+    ev = input_events(d, i0, 0)
+    info["debounce0_1us_bounce"] = {"events": ex(ev), "pending": in_state(d)[0]["extra"]}
+    drive(d, 0, "H1000")
+    d.cmd("io debounce 0 20")
 
     # all three pins report their own events
-    for p in (20, 21):
+    for p in (1, 2):
         f, ev = drive(d, p, "L1000")
         c.check("pin %d press: event active 1 extra 0" % p, ex(ev) == [(1, 0)], ev)
         f, ev = drive(d, p, "H1000")
         c.check("pin %d release: event active 0 extra 0" % p, ex(ev) == [(0, 0)], ev)
-    c.check("driving a non-input is bad_pin",
-            (d.cmd("io t_drive 5 L100") or {}).get("err") == "bad_pin")
+    for p in (3, 10):
+        c.check("driving input %d is bad_pin" % p,
+                (d.cmd("io t_drive %d L100" % p) or {}).get("err") == "bad_pin")
 
     # debounce persists in NVS
-    d.cmd("io debounce 21 77")
+    d.cmd("io debounce 2 77")
     d.reboot()
     f = d.cmd("io debounce")
-    c.check("debounce survives a reboot", f and f.get("debounce") == {"10": 20, "20": 20,
-                                                                      "21": 77}, f)
-    d.cmd("io debounce 21 20")
+    c.check("debounce survives a reboot", f and f.get("debounce") == {"0": 20, "1": 20,
+                                                                      "2": 77}, f)
+    d.cmd("io debounce 2 20")
     f = d.cmd("io debounce")
-    c.check("debounce back to 20", f and f["debounce"] == {"10": 20, "20": 20, "21": 20}, f)
+    c.check("debounce back to 20", f and f["debounce"] == {"0": 20, "1": 20, "2": 20}, f)
 
     # esp_timer-context emitter: proto_evt from a timer callback, with the port closed in
     # the middle (the writer stalls ~50 ms once), plus input events from the same task
@@ -423,9 +424,9 @@ def inputs(port):
     d.b.close()
     time.sleep(2.5)
     d.b = Board(port, settle=2.0)
-    f, ev = drive(d, 10, "L1000", wait=0.5)
+    f, ev = drive(d, 0, "L1000", wait=0.5)
     c.check("input event while the emitter runs (same esp_timer task)", ex(ev) == [(1, 0)], ev)
-    drive(d, 10, "H1000", wait=0.2)
+    drive(d, 0, "H1000", wait=0.2)
     d.b.pump(3.0)
     st = d.cmd("io t_stat")
     c.check("emitter finished all 250 events", st and st.get("emitted") == 250

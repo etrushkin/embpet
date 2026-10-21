@@ -130,7 +130,7 @@ static int64_t drive(int pin, const char *s)
         if (total > DRIVE_MAX_US) {
             return -1;
         }
-        gpio_set_level((gpio_num_t)pin, c == 'H' ? 1 : 0);
+        gpio_set_level((gpio_num_t)io_in_gpio(pin), c == 'H' ? 1 : 0);
         spin_us((uint32_t)us);
     }
     return total;
@@ -139,7 +139,7 @@ static int64_t drive(int pin, const char *s)
 static void t_drive(console_req_t *req)
 {
     int pin = s_drive_pin->ival[0];
-    if (io_in_index(pin) < 0) {
+    if (pin < 0 || pin >= IO_IN_COUNT) {
         console_err(req, CONSOLE_ERR_BAD_PIN, "not an input");
         return;
     }
@@ -154,7 +154,7 @@ static void t_drive(console_req_t *req)
         return;
     }
     cJSON_AddNumberToObject(p, "pin", pin);
-    cJSON_AddNumberToObject(p, "level", gpio_get_level((gpio_num_t)pin));
+    cJSON_AddNumberToObject(p, "level", gpio_get_level((gpio_num_t)io_in_gpio(pin)));
     cJSON_AddNumberToObject(p, "us", (double)us);
     console_ok(req, p);
 }
@@ -265,7 +265,7 @@ void io_test_register(void)
         ESP_ERROR_CHECK(gpio_isr_handler_add((gpio_num_t)io_out_gpio(pin), edge_isr,
                                              (void *)(intptr_t)pin));
     }
-    s_drive_pin = arg_int1(NULL, NULL, "<pin>", "input 10, 20 or 21");
+    s_drive_pin = arg_int1(NULL, NULL, "<pin>", "input 0-2");
     s_drive_seq = arg_str1(NULL, NULL, "<pattern>", "(L|H)<us>...");
     s_emit_n = arg_int1(NULL, NULL, "<n>", "events");
     s_emit_ms = arg_int1(NULL, NULL, "<ms>", "period");

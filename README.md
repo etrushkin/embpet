@@ -44,12 +44,12 @@ Example from the owner's side: actors **A** and **B** each send you a message. I
 | 5–7 | OUT5–OUT7 | JTAG pins (MTDI/MTCK/MTDO); free because JTAG runs over USB |
 | 8 | Status LED | Onboard blue LED, **active-low** (verified on the unit: GPIO8 high = dark, low = lit; `CONFIG_EMBPET_LED_ACTIVE_LOW=y`). **Strapping pin**, must be high at reset; leave nothing else on it. |
 | 9 | BOOT button | Strapping; reserved |
-| 10 | IN10 | |
-| 20 | IN20 | U0RXD. Sits next to the antenna, so wires here can detune Wi-Fi. |
-| 21 | IN21 | U0TXD. **The ROM prints its boot log on this pin at reset**, so an energised input opto briefly contends with it (limited by the 1 kΩ series resistor in §1.3). Also next to the antenna. |
+| 10 | IN0 | |
+| 20 | IN1 | U0RXD. Sits next to the antenna, so wires here can detune Wi-Fi. |
+| 21 | IN2 | U0TXD. **The ROM prints its boot log on this pin at reset**, so an energised input opto briefly contends with it (limited by the 1 kΩ series resistor in §1.3). Also next to the antenna. |
 | 18 / 19 | USB D− / D+ | Reserved |
 
-Outputs are addressed by logical number 0–7 (`OUT0` is GPIO4, `OUT1` GPIO3, `OUT2` GPIO2, `OUT3` GPIO1, `OUT4` GPIO0, `OUT5`–`OUT7` GPIO5–7); inputs are addressed by GPIO number (10, 20, 21).
+Outputs are addressed by logical number 0–7 (`OUT0` is GPIO4, `OUT1` GPIO3, `OUT2` GPIO2, `OUT3` GPIO1, `OUT4` GPIO0, `OUT5`–`OUT7` GPIO5–7); inputs are addressed by logical number 0–2 (`IN0` is GPIO10, `IN1` GPIO20, `IN2` GPIO21). Commands, events and replies use only the logical numbers; GPIO numbers appear only in the hardware description. Stored debounce times follow the physical pin.
 
 ### 1.3 Optocoupler interface (PC817C)
 
@@ -125,7 +125,7 @@ While offline the unanswered pattern is hidden; the `pending` count is still ava
 
 ### 2.3 Inputs
 
-GPIO 10, 20 and 21, wired through optos (§1.3). Active means the opto is energised and the pin is low.
+Inputs `IN0`–`IN2` on GPIO 10, 20 and 21, wired through optos (§1.3). Active means the opto is energised and the pin is low.
 
 - **Debounce:** an any-edge GPIO interrupt (re)starts a per-pin debounce timer. A change is accepted once the level has been stable for the debounce time. Default 20 ms, per pin 0–1000 ms, set with `io debounce` and stored in NVS. The edge interrupt and the debounce timer both run in interrupt context and from IRAM, so no task, and no flash write, can delay the decision.
 - **Debounce 0:** the level is sampled about 1 ms after the first edge (one storm window), so bounces inside that millisecond are folded into `extra`. An input reports at most 1000 events per second.
@@ -133,7 +133,7 @@ GPIO 10, 20 and 21, wired through optos (§1.3). Active means the opto is energi
 - **Events:** each accepted change emits an `input` event (`pin`, `active` as `1`/`0`, `extra`). There is no event at boot for an input that is already active.
 - **`extra`** is the number of raw edges since the previous `input` event for that pin, minus the one edge that produced the change. A clean change gives `0`. Contact bounce gives an even number (2, 4, …). A glitch shorter than the debounce time, which produces no event, is counted into the next event's `extra`. A host detects lost events through gaps in the frame `seq`.
 - **Timing:** the debounce decision stays on time while the Wi-Fi driver joins a WPA3 network (at boot, uptime about 1.8–4.4 s; also after `wifi set` and after Wi-Fi drops without a cached PMK, by the IDF code, not measured), but the `input` event is sent from a task and can then come up to about 0.33 s late (§3.1). Each pin's events keep their order, and a change undone within that time still gives both events. Across pins they keep their order too unless the 32-entry queue overflowed: a pin whose decision then waited reports that change after the other pins' decisions queued meanwhile. Up to 32 decisions can wait to be sent; beyond that a pin's next decision waits as well, and a change undone meanwhile gives no event, its edges counting into the next `extra`.
-- `io in` returns `active` (`1`/`0`, the last debounced state; its event may still be waiting to be sent, see Timing), raw `level` and `extra` accumulated so far since the last event, for each input. `io debounce <pin> <ms>` takes pin 10, 20 or 21 (else `err:"bad_pin"`) and 0–1000 ms (else `err:"bad_args"`); with no arguments it lists the three times.
+- `io in` returns `active` (`1`/`0`, the last debounced state; its event may still be waiting to be sent, see Timing), raw `level` and `extra` accumulated so far since the last event, for each input. `io debounce <pin> <ms>` takes input 0, 1 or 2 (else `err:"bad_pin"`) and 0–1000 ms (else `err:"bad_args"`); with no arguments it lists the three times.
 
 ### 2.4 Outputs
 
@@ -258,7 +258,7 @@ The `cmd` of an unknown command echoes the typed command words (e.g. `"sys nope"
 | `paired` | `chat_id` | Owner bound with `/start <code>` |
 | `pending` | `count` | Unanswered count changed |
 | `pending_dropped` | `actor`, `msg` | Table overflow |
-| `input` | `pin`, `active`, `extra` | Debounced input change |
+| `input` | `pin` (input 0–2), `active`, `extra` | Debounced input change |
 
 The last 32 events are kept in RAM. After a host reconnects it can replay them with `evt since <seq>`.
 
@@ -277,7 +277,7 @@ The last 32 events are kept in RAM. After a host reconnects it can replay them w
 | `wifi status` | Connection info | `state` (`up`/`down`/`unconfigured`), `ssid` (empty if unset), `txpower` (dBm); `ip` and `rssi` only when `up` |
 | `wifi txpower <dBm>` | TX power, 2–20 dBm in 0.25 steps (default 8.5), stored and applied at once | `txpower` |
 | `io in` | Read inputs | `in:[{pin,active,level,extra}]` |
-| `io debounce [<pin> <ms>]` | Show or set debounce | `debounce:{"10":20,...}` |
+| `io debounce [<pin> <ms>]` | Show or set debounce | `debounce:{"0":20,...}` |
 | `io set <pin> on\|off\|toggle` | Set an output | `pin`, `level` |
 | `io pulse <pin> [-d ms]` | Pulse-toggle an output (default 100 ms) | `pin`, `level`, `remaining_ms` |
 | `io get` | Output states | `out:[{pin,level,pulsing,remaining_ms}]` |
@@ -376,7 +376,7 @@ They default to a Debug build with AddressSanitizer and UBSan (`-fsanitize=addre
 ```bash
 scripts/hw.sh python tools/hil.py -m "not owner and not loopback"   # default selection, about 2 min
 scripts/hw.sh python tools/hil.py -m owner      # real sends to the paired owner; asks the human to reply in Telegram
-scripts/hw.sh python tools/hil.py -m loopback   # input events; needs OUTn -> opto -> IN wiring (EMBPET_LOOPBACK, default 0:10,1:20,2:21)
+scripts/hw.sh python tools/hil.py -m loopback   # input events; needs OUTn -> opto -> IN wiring (EMBPET_LOOPBACK, default 0:0,1:1,2:2)
 ```
 
 The suites are `protocol`, `io`, `wifi` and `tg` (the Wi-Fi-down paths run in one shared outage). Tests marked `owner` or `loopback` are skipped unless selected with `-m` (or `EMBPET_HIL_OWNER=1` / `EMBPET_HIL_LOOPBACK=1`). Settings the tests change (boot levels, debounce, outputs, log level, TX power, owner, Wi-Fi and token from `.env.local`) are restored afterwards, and the NVS is never erased; hard kills (SIGKILL, a dropped port) cannot be undone by fixtures, and a board with no Wi-Fi SSID ends up on the `.env.local` network (see `test/hil/README.md`). Do not pass `-l`, `--showlocals` or `--tb=long`: they print fixture locals, which include the `.env.local` secrets. Not covered by the default run: `evt since` with `truncated: true` (loopback only), reply routing, the online notice and a valid `tg token` (owner suite and `tools/pair_test.py` only). Telethon automation of the owner replies is not implemented.
