@@ -127,12 +127,21 @@ def ask_owner(request, text):
     it waits). Skips the test when there is no terminal. Returns the line the human typed."""
     capman = request.config.pluginmanager.getplugin("capturemanager")
     with capman.global_and_fixture_disabled():
-        # pytest's capture replaces sys.stdin, so ask the real file descriptor
-        if not os.isatty(0):
+        # pytest's fd capture keeps fd 0 on /dev/null even while suspended (in_=False), so
+        # talk to the controlling terminal directly (embpet-7eu)
+        # (separate handles: a text-mode "r+" open of a tty fails as not seekable)
+        try:
+            tty_in = open("/dev/tty")
+            tty_out = open("/dev/tty", "w")
+        except OSError:
             answer = None
         else:
-            print("\n>>> OWNER ACTION: %s" % text)
-            answer = input(">>> press Enter when done (or type 'skip'): ").strip()
+            with tty_in, tty_out:
+                tty_out.write("\n>>> OWNER ACTION: %s\n>>> press Enter when done "
+                              "(or type 'skip'): " % text)
+                tty_out.flush()
+                line = tty_in.readline()
+                answer = line.strip() if line else "skip"      # Ctrl-D: skip the step
     if answer is None:
         pytest.skip("owner step needs a terminal: " + text)
     return answer

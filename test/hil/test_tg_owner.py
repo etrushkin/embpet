@@ -1,7 +1,9 @@
 """Telegram bridge against the real, paired owner chat (README 2.1, 3.3). Marker: owner.
 
 These tests SEND short messages tagged [hil-e3d] to the owner chat, and some ask the human at
-the terminal to reply in Telegram, so they only run on request:
+the terminal to reply in Telegram, so they only run on request. A message the owner must
+answer says so in its own text ("HIL step N: use Reply on THIS message and send: ..."); all
+others say "please ignore":
 
     scripts/hw.sh python tools/hil.py -m owner         (or EMBPET_HIL_OWNER=1)
 
@@ -58,6 +60,40 @@ def prompt(request, text):
     answer = U.ask_owner(request, text)
     if answer.lower() == "skip":
         pytest.skip("skipped at the prompt")
+
+
+def drain(board):
+    """Drop the events seen so far, including those still in transit."""
+    list(board.events(0.5))
+
+
+class Step:
+    """A message the owner must answer. Its own text says what to reply, so the owner never
+    has to pick it out among the other [hil-e3d] messages (embpet-7eu)."""
+
+    def __init__(self, request, board):
+        self.request, self.board, self.sent = request, board, []
+        self.text = self.answer = None
+
+    def send(self, n, answer):
+        self.answer = answer
+        self.text = "HIL step %s: use Reply on THIS message and send: %s" % (n, answer)
+        res = self.board.cmd("tg send", text=[self.text], actor=ACTOR, timeout=20.0)
+        assert res["ok"] is True, res
+        self.sent.append(res["msg"])
+        drain(self.board)                   # this send's own pending event
+
+    def ask(self, extra=""):
+        prompt(self.request, '%sIn Telegram, use Reply on the bot message "[%s] %s" and send: %s'
+               % (extra, ACTOR, self.text, self.answer))
+
+
+@pytest.fixture()
+def step(request, board, online):
+    s = Step(request, board)
+    yield s
+    for msg in s.sent:
+        board.cmd("tg ack", "-m", str(msg))
 
 
 # ---- send / pending / ack: no human reply needed ----
@@ -152,25 +188,27 @@ def test_status_is_online_with_the_bot_name(board, online):
 
 # ---- the human replies ----
 
-def test_owner_reply_is_routed_to_the_actor(request, board, sent):
-    prompt(request, "In Telegram, use Reply on the newest bot message tagged [%s] and send "
-                    "the text: ok" % ACTOR)
+def test_owner_reply_is_routed_to_the_actor(board, step):
+    step.send(1, "ok")
+    step.ask()
     e = wait_event(board, "reply", 60.0, actor=ACTOR)
     assert e is not None, "no reply event within 60 s"
-    assert e["to"] == sent
+    assert e["to"] == step.sent[0], "the Reply went to another message"
     assert e["text"] == "ok"
     assert e["src"] == "table"
     assert isinstance(e["msg"], int) and isinstance(e["date"], int)
     assert pending_of(board) == []
 
 
-def test_reply_event_comes_before_the_pending_event_of_the_message_it_answers(
-        request, board, sent):
-    prompt(request, "Reply to the newest [%s] message with: second" % ACTOR)
+def test_reply_event_comes_before_the_pending_event_of_the_message_it_answers(board, step):
+    step.send(2, "second")
+    step.ask()
     seqs = {}
     for e in board.events(60.0):
-        if e.get("ev") in ("reply", "pending"):
-            seqs.setdefault(e["ev"], e["seq"])
+        if e.get("ev") == "reply" and e.get("to") == step.sent[0]:
+            seqs.setdefault("reply", e["seq"])
+        elif e.get("ev") == "pending":
+            seqs.setdefault("pending", e["seq"])
         if len(seqs) == 2:
             break
     assert set(seqs) == {"reply", "pending"}
@@ -178,18 +216,18 @@ def test_reply_event_comes_before_the_pending_event_of_the_message_it_answers(
 
 
 def test_message_without_reply_gets_a_hint_and_no_event(request, board, sent):
-    prompt(request, "In Telegram, write a normal message to the bot WITHOUT using Reply "
-                    "(the bot should answer with a hint to use Reply)")
+    prompt(request, "HIL step 3: in Telegram, write any new message to the bot WITHOUT using "
+                    "Reply (the bot should answer with a hint to use Reply)")
     assert wait_event(board, "reply", 8.0) is None
     assert pending_of(board)[0]["msg"] == sent
 
 
-def test_reply_after_a_reboot_is_routed_by_the_actor_prefix(request, board, sent):
+def test_reply_after_a_reboot_is_routed_by_the_actor_prefix(board, step):
+    step.send(4, "after reboot")
     U.reboot(board)
-    prompt(request, "The board just rebooted. Reply to the same [%s] message with: after reboot"
-           % ACTOR)
+    step.ask(extra="The board just rebooted (its pending table is empty). ")
     e = wait_event(board, "reply", 60.0, actor=ACTOR)
     assert e is not None, "no reply event within 60 s"
-    assert e["to"] == sent
+    assert e["to"] == step.sent[0], "the Reply went to another message"
     assert e["text"] == "after reboot"
     assert e["src"] == "prefix"
