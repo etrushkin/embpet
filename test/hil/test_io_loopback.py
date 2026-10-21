@@ -6,7 +6,8 @@ Skipped unless asked for:
 
 Wiring: output OUTn drives the field side of the input's opto, so that `io set n on` makes the
 input active (README 1.3). The pairs are OUT:IN in $EMBPET_LOOPBACK, default "0:10,1:20,2:21"
-(OUT0 -> IN10, OUT1 -> IN20, OUT2 -> IN21). Each pair is tested separately. Output levels and
+(OUT0 -> IN10, OUT1 -> IN20, OUT2 -> IN21; physically GPIO4 -> IN10, GPIO3 -> IN20,
+GPIO2 -> IN21, see the README 1.2 pin map). Each pair is tested separately. Output levels and
 debounce times are restored afterwards.
 """
 import os
@@ -110,7 +111,7 @@ def test_evt_since_reports_truncated_after_the_ring_overflows(board, pair):
         time.sleep(0.1)
         board.cmd("io set", str(out), "off")
         time.sleep(0.1)
-    list(board.events(0))
+    list(board.events(0.5))     # drain live events in transit; events(0) only returns queued ones
     res = board.cmd("evt since", str(seq0))
     replayed = list(board.events(0))
     assert res["truncated"] is True

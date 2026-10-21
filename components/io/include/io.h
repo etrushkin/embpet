@@ -5,9 +5,19 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "esp_attr.h"
 #include "esp_err.h"
 
-#define IO_OUT_COUNT 8                  /* OUT0..OUT7 = GPIO0..GPIO7 (README 1.2) */
+#define IO_OUT_COUNT 8                  /* OUT0..OUT7 on GPIO4,3,2,1,0,5,6,7 (README 1.2) */
+
+/* GPIO number of logical output n (0..IO_OUT_COUNT-1, the caller validates); the one place
+ * the wiring is defined. ISR callbacks read it with the flash cache off, so the table is in
+ * DRAM (io_out.c) and the accessor is always inlined, also at -O0. */
+extern const uint8_t io_out_gpio_tab[IO_OUT_COUNT];
+FORCE_INLINE_ATTR int io_out_gpio(int n)
+{
+    return io_out_gpio_tab[n];
+}
 
 typedef struct {
     bool on;                            /* logical level: on = opto conducting = pin low */
@@ -15,8 +25,8 @@ typedef struct {
     uint32_t remaining_ms;              /* 0 when not pulsing */
 } io_out_state_t;
 
-/* PLAN 1.2 step 1, before NVS/cfg: for GPIO0..7 write the latch high (off), then enable
- * the pin as output, so there is no glitch. Boot levels follow in io_outputs_apply_boot().
+/* PLAN 1.2 step 1, before NVS/cfg: for each output's GPIO write the latch high (off), then
+ * enable the pin as output, so there is no glitch. Boot levels follow in io_outputs_apply_boot().
  * Creates the lock and the per-pin pulse timers (aborts if that fails). */
 void io_outputs_init(void);
 

@@ -50,7 +50,7 @@ static void IRAM_ATTR edge_isr(void *arg)
     edge_t *e = &s_ring[h & (EDGE_RING - 1)];
     e->t_us = esp_timer_get_time();
     e->pin = (uint8_t)pin;
-    e->level = (uint8_t)gpio_get_level((gpio_num_t)pin);
+    e->level = (uint8_t)gpio_get_level((gpio_num_t)io_out_gpio(pin));
     s_head = h + 1;
 }
 
@@ -71,7 +71,7 @@ static void t_edges(console_req_t *req)
     }
     int raw = 0;
     for (int pin = 0; pin < IO_OUT_COUNT; pin++) {
-        raw |= gpio_get_level((gpio_num_t)pin) << pin;
+        raw |= gpio_get_level((gpio_num_t)io_out_gpio(pin)) << pin;
     }
     uint32_t head = s_head;
     for (uint32_t t = s_tail; t != head; t++) {
@@ -86,7 +86,7 @@ static void t_edges(console_req_t *req)
         cJSON_AddItemToArray(edges, a);
     }
     s_tail = head;
-    cJSON_AddNumberToObject(p, "raw", raw);             /* bit n = level of GPIO n */
+    cJSON_AddNumberToObject(p, "raw", raw);             /* bit n = level of OUTn's GPIO */
     cJSON_AddNumberToObject(p, "dropped", (double)s_dropped);
     cJSON_AddItemToObject(p, "edges", edges);
     console_ok(req, p);
@@ -261,8 +261,9 @@ void io_test_register(void)
         ESP_ERROR_CHECK(err);
     }
     for (int pin = 0; pin < IO_OUT_COUNT; pin++) {
-        ESP_ERROR_CHECK(gpio_set_intr_type((gpio_num_t)pin, GPIO_INTR_ANYEDGE));
-        ESP_ERROR_CHECK(gpio_isr_handler_add((gpio_num_t)pin, edge_isr, (void *)(intptr_t)pin));
+        ESP_ERROR_CHECK(gpio_set_intr_type((gpio_num_t)io_out_gpio(pin), GPIO_INTR_ANYEDGE));
+        ESP_ERROR_CHECK(gpio_isr_handler_add((gpio_num_t)io_out_gpio(pin), edge_isr,
+                                             (void *)(intptr_t)pin));
     }
     s_drive_pin = arg_int1(NULL, NULL, "<pin>", "input 10, 20 or 21");
     s_drive_seq = arg_str1(NULL, NULL, "<pattern>", "(L|H)<us>...");

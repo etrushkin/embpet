@@ -1,4 +1,5 @@
-/* Outputs OUT0..OUT7 on GPIO0..7, sink wiring: logical on = pin low (README 1.3).
+/* Outputs OUT0..OUT7 on GPIO4,3,2,1,0,5,6,7 (io_out_gpio_tab), sink wiring: logical on =
+ * pin low (README 1.3).
  * One spinlock guards the per-pin pulse state and the pin writes. The esp_timer callback
  * that ends a pulse is dispatched from the timer interrupt (ESP_TIMER_ISR), so the edge
  * lands on time even while a higher-priority task (the Wi-Fi driver during WPA3-SAE)
@@ -23,6 +24,8 @@
 #include "pulse_core.h"
 #include "sdkconfig.h"
 
+const DRAM_ATTR uint8_t io_out_gpio_tab[IO_OUT_COUNT] = {4, 3, 2, 1, 0, 5, 6, 7};
+
 static pulse_t s_pin[IO_OUT_COUNT];
 static esp_timer_handle_t s_timer[IO_OUT_COUNT];
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -34,7 +37,7 @@ static uint64_t IRAM_ATTR now_ms(void)
 
 static void IRAM_ATTR write_pin(int pin)
 {
-    gpio_set_level((gpio_num_t)pin, s_pin[pin].on ? 0 : 1);
+    gpio_set_level((gpio_num_t)io_out_gpio(pin), s_pin[pin].on ? 0 : 1);
 }
 
 static void fill(int pin, io_out_state_t *st)
@@ -62,9 +65,9 @@ static void IRAM_ATTR pulse_end_cb(void *arg)
 void io_outputs_init(void)
 {
     for (int pin = 0; pin < IO_OUT_COUNT; pin++) {
-        gpio_set_level((gpio_num_t)pin, 1);         /* latch off first ... */
+        gpio_set_level((gpio_num_t)io_out_gpio(pin), 1);    /* latch off first ... */
         const gpio_config_t c = {
-            .pin_bit_mask = 1ULL << pin,
+            .pin_bit_mask = 1ULL << io_out_gpio(pin),
 #ifdef CONFIG_EMBPET_IO_TEST
             .mode = GPIO_MODE_INPUT_OUTPUT,         /* readback for the on-chip pulse check */
 #else

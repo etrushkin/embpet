@@ -36,11 +36,12 @@ Example from the owner's side: actors **A** and **B** each send you a message. I
 
 | GPIO | Function | Notes |
 |---|---|---|
-| 0 | OUT0 | Alt function XTAL_32K_P (no 32 kHz crystal on this board) |
-| 1 | OUT1 | Alt function XTAL_32K_N |
+| 0 | OUT4 | Alt function XTAL_32K_P (no 32 kHz crystal on this board) |
+| 1 | OUT3 | Alt function XTAL_32K_N |
 | 2 | OUT2 | **Strapping pin**, must read high at reset or the chip may not boot. Wire its opto in the sink configuration (§1.3). |
-| 3 | OUT3 | |
-| 4–7 | OUT4–OUT7 | JTAG pins (MTMS/MTDI/MTCK/MTDO); free because JTAG runs over USB |
+| 3 | OUT1 | |
+| 4 | OUT0 | JTAG pin (MTMS); free because JTAG runs over USB |
+| 5–7 | OUT5–OUT7 | JTAG pins (MTDI/MTCK/MTDO); free because JTAG runs over USB |
 | 8 | Status LED | Onboard blue LED, **active-low** (verified on the unit: GPIO8 high = dark, low = lit; `CONFIG_EMBPET_LED_ACTIVE_LOW=y`). **Strapping pin**, must be high at reset; leave nothing else on it. |
 | 9 | BOOT button | Strapping; reserved |
 | 10 | IN10 | |
@@ -48,7 +49,7 @@ Example from the owner's side: actors **A** and **B** each send you a message. I
 | 21 | IN21 | U0TXD. **The ROM prints its boot log on this pin at reset**, so an energised input opto briefly contends with it (limited by the 1 kΩ series resistor in §1.3). Also next to the antenna. |
 | 18 / 19 | USB D− / D+ | Reserved |
 
-Output numbers equal GPIO numbers (`OUT3` is GPIO3); inputs are addressed by GPIO number (10, 20, 21).
+Outputs are addressed by logical number 0–7 (`OUT0` is GPIO4, `OUT1` GPIO3, `OUT2` GPIO2, `OUT3` GPIO1, `OUT4` GPIO0, `OUT5`–`OUT7` GPIO5–7); inputs are addressed by GPIO number (10, 20, 21).
 
 ### 1.3 Optocoupler interface (PC817C)
 
