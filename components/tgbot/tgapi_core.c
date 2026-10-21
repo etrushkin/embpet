@@ -405,6 +405,144 @@ bool tg_updates_first_id(const char *body, size_t len, int64_t *update_id)
     return true;
 }
 
+/* ------------------------------------------------------------ unescape */
+
+static int hex_val(char c)
+{
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+/* "\uXXXX" at s[0..n): 1 with its value in *cp, 0 if s is a proper prefix of one (more input
+ * could complete it), -1 if it is not one. */
+static int match_u(const char *s, size_t n, uint32_t *cp)
+{
+    uint32_t v = 0;
+    for (size_t i = 0; i < 6; i++) {
+        if (i >= n) {
+            return 0;
+        }
+        int h = i >= 2 ? hex_val(s[i]) : 0;
+        if ((i == 0 && s[i] != '\\') || (i == 1 && s[i] != 'u') || h < 0) {
+            return -1;
+        }
+        v = (v << 4) | (uint32_t)h;
+    }
+    *cp = v;
+    return 1;
+}
+
+size_t tg_json_unescape(char *buf, size_t len, bool final, size_t *rest)
+{
+    size_t r = 0;               /* read position */
+    size_t w = 0;               /* write position, never past r */
+    *rest = 0;
+    while (r < len) {
+        if (buf[r] != '\\') {
+            buf[w++] = buf[r++];
+            continue;
+        }
+        uint32_t cp = 0;
+        uint32_t lo = 0;
+        int m = match_u(buf + r, len - r, &cp);
+        int m2 = m > 0 && cp >= 0xD800 && cp <= 0xDBFF ? match_u(buf + r + 6, len - r - 6, &lo)
+                                                      : -1;
+        if (!final && (m == 0 || m2 == 0)) {
+            /* undecided until more input arrives: at most TG_UNESC_HOLD bytes */
+            memmove(buf + w, buf + r, len - r);
+            *rest = len - r;
+            return w;
+        }
+        if (m <= 0) {
+            /* another escape (\" \\ \n ...), a malformed \u or a cut-off end: keep the
+             * backslash and the byte after it, so an escaped backslash is never re-read */
+            size_t k = len - r < 2 ? len - r : 2;
+            memmove(buf + w, buf + r, k);
+            w += k;
+            r += k;
+            continue;
+        }
+        size_t used = 6;
+        if (m2 > 0 && lo >= 0xDC00 && lo <= 0xDFFF) {
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+            used = 12;
+        }
+        if (cp < 0x80 || (cp >= 0xD800 && cp <= 0xDFFF)) {
+            /* ASCII keeps its escape; so does a lone surrogate (UTF-8 cannot carry it) */
+            memmove(buf + w, buf + r, 6);
+            w += 6;
+            r += 6;
+            continue;
+        }
+        /* cp is read: its escape text may now be overwritten */
+        if (cp < 0x800) {
+            buf[w++] = (char)(0xC0 | (cp >> 6));
+        } else if (cp < 0x10000) {
+            buf[w++] = (char)(0xE0 | (cp >> 12));
+            buf[w++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        } else {
+            buf[w++] = (char)(0xF0 | (cp >> 18));
+            buf[w++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+            buf[w++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        }
+        buf[w++] = (char)(0x80 | (cp & 0x3F));
+        r += used;
+    }
+    return w;
+}
+
+tg_status_t tg_read_body(int64_t content_length, size_t max_len, tg_read_fn read, void *ctx,
+                         tg_body_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (content_length > 0 && (uint64_t)content_length > 3 * (uint64_t)max_len) {
+        out->wire = (size_t)content_length;
+        return TG_ERR_TOO_LARGE;
+    }
+    size_t cap = max_len + 1 + TG_UNESC_HOLD;
+    if (content_length > 0 && (uint64_t)content_length < cap) {
+        cap = (size_t)content_length;
+    }
+    char *buf = malloc(cap);
+    if (buf == NULL) {
+        return TG_ERR_NO_MEM;
+    }
+    size_t n = 0;               /* unescaped bytes in buf */
+    size_t rest = 0;            /* held-back escape bytes after them */
+    size_t got = 0;             /* bytes read */
+    size_t end = content_length > 0 ? (size_t)content_length : SIZE_MAX;
+    /* A full buffer (n + rest == cap) means n is over max_len, as rest <= TG_UNESC_HOLD, or
+     * cap is content_length and all of it was read. */
+    while (n <= max_len && n + rest < cap && got < end) {
+        size_t room = cap - n - rest;
+        int r = read(ctx, buf + n + rest, room < end - got ? room : end - got);
+        if (r <= 0) {
+            break;
+        }
+        got += (size_t)r;
+        n += tg_json_unescape(buf + n, rest + (size_t)r, false, &rest);
+    }
+    n += tg_json_unescape(buf + n, rest, true, &rest);
+    out->len = n;
+    out->wire = content_length > 0 ? (size_t)content_length : got;
+    if (n > max_len) {
+        out->buf = buf;
+        return TG_ERR_TOO_LARGE;
+    }
+    /* Give back what unescaping saved before cJSON copies the body into its tree. */
+    char *fit = n > 0 && n < cap ? realloc(buf, n) : NULL;
+    out->buf = fit != NULL ? fit : buf;
+    return TG_OK;
+}
+
 /* ------------------------------------------------------------ retry */
 
 uint32_t tg_retry_delay_ms(tg_status_t st, uint32_t retry_after_s, unsigned attempt)

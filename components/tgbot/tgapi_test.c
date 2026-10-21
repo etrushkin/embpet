@@ -11,10 +11,12 @@
  *                             the next offset and how many are private messages, never
  *                             chat ids or message text. Does not confirm anything beyond
  *                             the given offset.
- *  - tg t_send <chat> [-r M] [-a A] -- <text>
- *                             sendMessage ("[A] text", or plain text without -a); answers
+ *  - tg t_send <chat> [-r M] [-n N] [-a A] -- <text>
+ *                             sendMessage ("[A] text", or plain text without -a; -n: the
+ *                             text repeated N times, past the command line limit); answers
  *                             the message id, the bold entity and reply id as Telegram
- *                             echoed them, and the response size in bytes
+ *                             echoed them, and the response size in bytes as received
+ *                             (bytes) and as held after unescaping (held)
  *  - tg t_soak <s> <chat> <every_s> [-g ms]
  *                             for s seconds: long polling (confirming every update) and,
  *                             on the send connection, getMe every 15 s (or -g ms) plus
@@ -367,7 +369,8 @@ static cJSON *outcome(const job_t *j)
         cJSON_AddNumberToObject(p, "code", j->err.error_code);
         cJSON_AddStringToObject(p, "desc", j->err.description);
         cJSON_AddNumberToObject(p, "retry_after", j->err.retry_after_s);
-        cJSON_AddNumberToObject(p, "bytes", (double)j->err.body_len);
+        cJSON_AddNumberToObject(p, "bytes", (double)j->err.wire_len);
+        cJSON_AddNumberToObject(p, "held", (double)j->err.body_len);
         cJSON_AddNumberToObject(p, "ms", j->ms);
     }
     return p;
@@ -501,12 +504,15 @@ static const console_cmd_t s_t_poll = {
     .handler = t_poll,
 };
 
-/* ---- tg t_send <chat> [-r msg] -a A -- <text> ---- */
+/* ---- tg t_send <chat> [-r msg] [-n count] -a A -- <text> ---- */
+
+#define SEND_REPEAT_MAX 4096    /* -n: a 4096-unit text of one BMP character */
 
 static struct arg_str *s_send_chat;
 static struct arg_str *s_send_reply;
+static struct arg_int *s_send_repeat;
 static struct arg_str *s_send_text;
-static void *s_send_args[4];
+static void *s_send_args[5];
 
 static void t_send(console_req_t *req)
 {
@@ -515,15 +521,25 @@ static void t_send(console_req_t *req)
         return;
     }
     job_t *j = &s_send.job;
+    int repeat = s_send_repeat->count > 0 ? s_send_repeat->ival[0] : 1;
     if (!parse_i64(s_send_chat->sval[0], &j->chat) ||
-        (s_send_reply->count > 0 && !parse_i64(s_send_reply->sval[0], &j->reply_to))) {
-        console_err(req, CONSOLE_ERR_BAD_ARGS, "<chat> [-r <msg>] [-a <actor>] -- <text>");
+        (s_send_reply->count > 0 && !parse_i64(s_send_reply->sval[0], &j->reply_to)) ||
+        repeat < 1 || repeat > SEND_REPEAT_MAX) {
+        console_err(req, CONSOLE_ERR_BAD_ARGS,
+                    "<chat> [-r <msg>] [-n <1..4096>] [-a <actor>] -- <text>");
         return;
     }
     if (actor != NULL) {
         strcpy(j->actor, actor);        /* validated by the console */
     }
-    j->text = strdup(s_send_text->sval[0]);
+    size_t tlen = strlen(s_send_text->sval[0]);
+    j->text = malloc(tlen * (size_t)repeat + 1);
+    if (j->text != NULL) {
+        for (int i = 0; i < repeat; i++) {
+            memcpy(j->text + tlen * (size_t)i, s_send_text->sval[0], tlen);
+        }
+        j->text[tlen * (size_t)repeat] = '\0';
+    }
     if (j->text == NULL) {
         oom(req);
         return;
@@ -659,13 +675,14 @@ void tgapi_test_register(void)
     s_poll_to = arg_int0("t", NULL, "<s>", "long-poll timeout");
     s_send_chat = arg_str1(NULL, NULL, "<chat>", "chat id");
     s_send_reply = arg_str0("r", NULL, "<msg>", "reply to message id");
+    s_send_repeat = arg_int0("n", NULL, "<count>", "send the text repeated count times");
     s_send_text = arg_str1(NULL, NULL, "<text>", "message text");
     s_soak_s = arg_int1(NULL, NULL, "<s>", "duration");
     s_soak_chat_arg = arg_str1(NULL, NULL, "<chat>", "chat id or 0");
     s_soak_every = arg_int1(NULL, NULL, "<every_s>", "send period");
     s_soak_getme = arg_int0("g", NULL, "<ms>", "getMe period (default 15000)");
     if (s_tok_arg == NULL || s_poll_off == NULL || s_poll_to == NULL || s_send_chat == NULL ||
-        s_send_reply == NULL || s_send_text == NULL || s_soak_s == NULL ||
+        s_send_reply == NULL || s_send_repeat == NULL || s_send_text == NULL || s_soak_s == NULL ||
         s_soak_chat_arg == NULL || s_soak_every == NULL || s_soak_getme == NULL) {
         ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
     }
@@ -674,7 +691,8 @@ void tgapi_test_register(void)
     s_poll_args[1] = s_poll_to;
     s_send_args[0] = s_send_chat;
     s_send_args[1] = s_send_reply;
-    s_send_args[2] = s_send_text;
+    s_send_args[2] = s_send_repeat;
+    s_send_args[3] = s_send_text;
     s_soak_args[0] = s_soak_s;
     s_soak_args[1] = s_soak_chat_arg;
     s_soak_args[2] = s_soak_every;

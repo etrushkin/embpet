@@ -35,6 +35,24 @@ static const char FX_GET_UPDATES[] =
     "\"first_name\":\"Owner\"},\"chat\":{\"id\":111222333,\"first_name\":\"Owner\","
     "\"type\":\"private\"},\"date\":1760450140,\"text\":\"hello\"}}]}";
 
+/* An owner reply in Cyrillic, CJK and emoji to a bot message, with the escapes Telegram
+ * keeps (quote, backslash, slash, newline) and a literal "\u00e9" (escaped backslash). */
+static const char FX_GET_UPDATES_INTL[] =
+    "{\"ok\":true,\"result\":[{\"update_id\":861234569,\n"
+    "\"message\":{\"message_id\":506,\"from\":{\"id\":111222333,\"is_bot\":false,"
+    "\"first_name\":\"\\u0412\\u043b\\u0430\\u0434\\u0435\\u043b\\u0435\\u0446\","
+    "\"language_code\":\"ru\"},\"chat\":{\"id\":111222333,"
+    "\"first_name\":\"\\u0412\\u043b\\u0430\\u0434\\u0435\\u043b\\u0435\\u0446\","
+    "\"type\":\"private\"},\"date\":1760450150,"
+    "\"reply_to_message\":{\"message_id\":505,\"from\":{\"id\":7123456789,\"is_bot\":true,"
+    "\"first_name\":\"embpet\",\"username\":\"embpet_test_bot\"},\"chat\":{\"id\":111222333,"
+    "\"type\":\"private\"},\"date\":1760450100,"
+    "\"text\":\"[C] \\u4e2d\\u6587 \\\"q\\\" C:\\\\u00e9 a\\/b\\n\\ud83d\\ude00\\ud83d\\udc4d"
+    "\\ud83c\\udffd caf\\u00e9\","
+    "\"entities\":[{\"offset\":0,\"length\":3,\"type\":\"bold\"}]},"
+    "\"text\":\"\\u0434\\u0430, \\u043f\\u043e\\u0447\\u0438\\u0441\\u0442\\u0438 "
+    "\\u2014 \\u597d\\u7684 \\ud83d\\udc4d\"}}]}";
+
 static const char FX_EMPTY_UPDATES[] = "{\"ok\":true,\"result\":[]}";
 
 static const char FX_401[] = "{\"ok\":false,\"error_code\":401,\"description\":\"Unauthorized\"}";

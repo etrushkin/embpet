@@ -105,30 +105,53 @@ def check_send(x, chat, suite):
 
 def check_plain_and_escaping(x, chat):
     """Plain-text send (no tag, no entities), then measure how big Telegram's JSON answer
-    gets per character, to size the getUpdates cap (docs/PLAN.md 1.2)."""
+    gets per character on the wire (\\uXXXX escapes) and as the firmware holds it (escapes
+    of non-ASCII rewritten to raw UTF-8 while reading), to check the getUpdates cap
+    (docs/PLAN.md 1.2)."""
     c = x.c
     r = x.cmd("tg t_send", str(chat), text=["embpet q9h plain text check"])
     c.check("api: plain sendMessage ok, no entities",
             r.get("st") == "ok" and r.get("msg", 0) > 0 and r.get("ent_len") == 0, r)
-    base = x.cmd("tg t_send", str(chat), text=["x"]).get("bytes", 0)
-    cost = {}
+    r = x.cmd("tg t_send", str(chat), text=["x"])
+    base, base_held = r.get("bytes", 0), r.get("held")
+    wire, held = {}, {}
+    # Texts go as -n repeats of one character (a 4096-char CJK text is over the console line
+    # limit). 4096 CJK chars answer with ~24.9 KB on the wire, over TG_RESP_MAX: accepted only
+    # because the firmware unescapes while reading (~12.5 KB held).
     for name, ch, n in (("ascii", "x", 4000), ("cyrillic", "Ж", 2000),
-                        ("cjk", "中", 1400), ("emoji", "\U0001F600", 1000)):
-        r = x.cmd("tg t_send", str(chat), text=[ch * n])
+                        ("cjk", "中", 4096), ("emoji", "\U0001F600", 1000)):
+        r = x.cmd("tg t_send", str(chat), "-n", str(n), text=[ch])
         ok = r.get("st") == "ok"
-        c.check("api: %d x %s sent" % (n, name), ok, r)
-        units = len((ch * n).encode("utf-16-le")) // 2
+        label = "api: %d x %s sent" % (n, name)
+        if name == "cjk":
+            label += " (over TG_RESP_MAX on the wire, within it held)"
+            c.check(label, ok and r.get("bytes", 0) > 16384 >= r.get("held", 16385), r)
+        else:
+            c.check(label, ok, r)
+        units = n * (len(ch.encode("utf-16-le")) // 2)
         if ok:
-            cost[name] = (r["bytes"] - base) / (units - 1)
-            print("INFO response %d bytes for %d %s chars (%d UTF-16 units): %.2f bytes/unit"
-                  % (r["bytes"], n, name, units, cost[name]), flush=True)
-    if cost:
-        worst = max(cost.values())
+            wire[name] = (r["bytes"] - base) / (units - 1)
+            if r.get("held") is not None and base_held is not None:
+                held[name] = (r["held"] - base_held) / (units - 1)
+            print("INFO response %d bytes for %d %s chars (%d UTF-16 units): %.2f bytes/unit; "
+                  "held %s bytes unescaped: %s bytes/unit"
+                  % (r["bytes"], n, name, units, wire[name], r.get("held"),
+                     "%.2f" % held[name] if name in held else "?"), flush=True)
+    if wire:
         # limit-1 update: owner reply text + quoted bot text, 4096 units each, + metadata
-        est = int(2 * 4096 * worst + 1500)
-        print("INFO worst case %.2f bytes/unit -> limit-1 reply update ~%d bytes "
-              "(cap TG_RESP_MAX_ONE 32768, TG_RESP_MAX 16384)" % (worst, est), flush=True)
-        c.check("api: worst-case single update fits TG_RESP_MAX_ONE", est <= 32768, est)
+        est_wire = int(2 * 4096 * max(wire.values()) + 1500)
+        print("INFO worst case %.2f bytes/unit on the wire -> limit-1 reply update ~%d bytes "
+              "(cap TG_RESP_MAX_ONE 32768, TG_RESP_MAX 16384)"
+              % (max(wire.values()), est_wire), flush=True)
+        label = "api: worst-case single update fits TG_RESP_MAX_ONE unescaped"
+        if len(held) == len(wire):
+            worst = max(held.values())
+            est = int(2 * 4096 * worst + 1500)
+            print("INFO worst case %.2f bytes/unit held -> limit-1 reply update ~%d bytes"
+                  % (worst, est), flush=True)
+            c.check(label, est <= 32768, est)
+        else:
+            c.check(label, False, "no held size in the t_send answers (old firmware?)")
 
 
 def suite_api(x, chat=0):

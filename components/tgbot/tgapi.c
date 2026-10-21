@@ -247,8 +247,13 @@ static tg_status_t too_large(tgapi_conn_t *c, int status, size_t total, size_t m
     return st;
 }
 
-/* Send the request and read the answer (at most max_len bytes) into a buffer sized by
- * Content-Length. */
+/* tg_read_fn over the response body. */
+static int read_body(void *ctx, char *buf, size_t cap)
+{
+    return esp_http_client_read((esp_http_client_handle_t)ctx, buf, (int)cap);
+}
+
+/* Send the request and read the answer, unescaped while it arrives (tg_read_body). */
 static tg_status_t request(tgapi_conn_t *c, const char *body, size_t max_len, tg_resp_t *out,
                            esp_err_t *net_err)
 {
@@ -290,22 +295,14 @@ static tg_status_t request(tgapi_conn_t *c, const char *body, size_t max_len, tg
     }
 
     int status = esp_http_client_get_status_code(c->h);
-    if (clen > 0 && (uint64_t)clen > max_len) {
-        return too_large(c, status, (size_t)clen, max_len, NULL, 0, out);
-    }
-    /* Content-Length known: exactly that. Chunked (or none): one byte over the cap, so an
-     * oversized body shows up as a full buffer. */
-    size_t cap = clen > 0 ? (size_t)clen : max_len + 1;
-    char *buf = malloc(cap);
-    if (buf == NULL) {
+    tg_body_t b;
+    tg_status_t st = tg_read_body(clen, max_len, read_body, c->h, &b);
+    if (st == TG_ERR_NO_MEM) {
         tgapi_conn_close(c);
-        return TG_ERR_NO_MEM;
+        return st;
     }
-    int r = esp_http_client_read_response(c->h, buf, (int)cap);
-    size_t n = r > 0 ? (size_t)r : 0;
-    tg_status_t st;
-    if (n > max_len) {
-        st = too_large(c, status, n, max_len, buf, n, out);
+    if (st == TG_ERR_TOO_LARGE) {
+        st = too_large(c, status, clen > 0 ? (size_t)clen : b.len, max_len, b.buf, b.len, out);
     } else if (!esp_http_client_is_complete_data_received(c->h)) {
         tgapi_conn_close(c);
         *net_err = ESP_ERR_HTTP_INCOMPLETE_DATA;
@@ -317,9 +314,10 @@ static tg_status_t request(tgapi_conn_t *c, const char *body, size_t max_len, tg
         } else {
             tgapi_conn_close(c);
         }
-        st = tg_parse_response(status, buf, n, max_len, out);
+        st = tg_parse_response(status, b.buf, b.len, max_len, out);
     }
-    free(buf);
+    out->wire_len = b.wire;
+    free(b.buf);
     return st;
 }
 
@@ -529,9 +527,9 @@ tg_status_t tgapi_get_updates_one(tgapi_conn_t *c, int64_t offset, tg_resp_t *ou
     tg_status_t st = call(c, "getUpdates", body, TG_RESP_MAX_ONE, out);
     cJSON_free(body);
     if (st == TG_ERR_TOO_LARGE) {
-        ESP_LOGW(TAG, "update %lld is %u bytes, over the %u-byte cap even alone: "
-                 "the poller has to skip it", (long long)out->first_update_id,
-                 (unsigned)out->body_len, (unsigned)TG_RESP_MAX_ONE);
+        ESP_LOGW(TAG, "update %lld (%u bytes on the wire) is over the %u-byte cap even alone "
+                 "and unescaped: the poller has to skip it", (long long)out->first_update_id,
+                 (unsigned)out->wire_len, (unsigned)TG_RESP_MAX_ONE);
     }
     return st;
 }

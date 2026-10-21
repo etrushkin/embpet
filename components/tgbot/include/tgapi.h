@@ -63,8 +63,10 @@ void tgapi_conn_close(tgapi_conn_t *c);
  * classify the answer (tg_parse_response). *out is always written: on TG_OK out->result
  * holds the result and the caller frees it with tg_resp_free; on errors out carries
  * error_code, description and retry_after_s and owns nothing.
- * The response body is read into a buffer sized by Content-Length (at most TG_RESP_MAX,
- * freed before returning); a larger body closes the session and gives TG_ERR_TOO_LARGE.
+ * The response body is unescaped while it is read (tg_read_body: non-ASCII \uXXXX escapes
+ * become UTF-8) into a buffer of min(Content-Length, TG_RESP_MAX + 1 + TG_UNESC_HOLD) bytes,
+ * freed before returning. A body whose unescaped size is larger than TG_RESP_MAX closes the
+ * session and gives TG_ERR_TOO_LARGE.
  * A failure on a kept-alive session that the server had already closed (connection reset
  * or closed before any response header) is retried once on a fresh session; a timeout is
  * never retried, so a request is not sent twice because the server was slow. The retry
@@ -103,14 +105,14 @@ tg_status_t tgapi_send_message(tgapi_conn_t *c, int64_t chat_id, const char *act
 /* getUpdates(offset, limit TG_UPDATES_LIMIT, timeout CONFIG_EMBPET_TG_POLL_TIMEOUT_S,
  * allowed_updates ["message"]). Use the poll connection. On TG_OK out->result is the
  * update array; the caller frees it with tg_resp_free. On TG_ERR_TOO_LARGE (over
- * TG_RESP_MAX) the body is dropped: retry with tgapi_get_updates_one. */
+ * TG_RESP_MAX unescaped) the body is dropped: retry with tgapi_get_updates_one. */
 tg_status_t tgapi_get_updates(tgapi_conn_t *c, int64_t offset, tg_resp_t *out);
 
 /* getUpdates(offset, limit 1, timeout 0) with the larger cap TG_RESP_MAX_ONE, which fits
- * the largest possible owner reply quoting the largest possible bot message (docs/PLAN.md
- * 1.2). If it is still TG_ERR_TOO_LARGE (not expected from the Bot API), a WARN is logged
- * and the poller has to skip the update: offset = out->first_update_id + 1 (the id seen at
- * the start of the body; 0 if it could not be read, then retry later). */
+ * the largest possible owner reply quoting the largest possible bot message once unescaped
+ * (docs/PLAN.md 1.2). If it is still TG_ERR_TOO_LARGE (not expected from the Bot API), a
+ * WARN is logged and the poller has to skip the update: offset = out->first_update_id + 1
+ * (the id seen at the start of the body; 0 if it could not be read, then retry later). */
 tg_status_t tgapi_get_updates_one(tgapi_conn_t *c, int64_t offset, tg_resp_t *out);
 
 #endif /* EMBPET_TGAPI_H */
