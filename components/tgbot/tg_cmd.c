@@ -216,13 +216,34 @@ static const console_cmd_t s_tg_status = {
     .handler = tg_status,
 };
 
-/* ---- tg token <token> ---- */
+/* ---- tg token <token> | --clear ---- */
 
 static struct arg_str *s_token_arg;
-static void *s_token_args[2];
+static struct arg_lit *s_token_clear;
+static void *s_token_args[3];
 
 static void tg_token(console_req_t *req)
 {
+    bool clear = s_token_clear->count > 0;
+    if (clear == (s_token_arg->count > 0)) {
+        console_err(req, CONSOLE_ERR_BAD_ARGS, "give a token or --clear, not both or neither");
+        return;
+    }
+    if (clear) {
+        esp_err_t err = bridge_token_clear();
+        if (err != ESP_OK) {
+            console_err(req, CONSOLE_ERR_INTERNAL, esp_err_to_name(err));
+            return;
+        }
+        cJSON *p = cJSON_CreateObject();
+        if (p == NULL || cJSON_AddStringToObject(p, "token", "") == NULL) {
+            cJSON_Delete(p);
+            oom(req);
+            return;
+        }
+        console_ok(req, p);
+        return;
+    }
     char bot[STATE_BOT_LEN];
     char msg[128];
     const char *code = bridge_set_token(s_token_arg->sval[0], bot, sizeof(bot), msg, sizeof(msg));
@@ -244,7 +265,8 @@ static void tg_token(console_req_t *req)
 
 static const console_cmd_t s_tg_token = {
     .name = "tg token",
-    .help = "Check the bot token with Telegram, store it, restart the poller (give it after --)",
+    .help = "Check the bot token with Telegram, store it, restart the poller (give it after --); "
+            "--clear erases it and stops the poller",
     .args = s_token_args,
     .handler = tg_token,
 };
@@ -327,7 +349,8 @@ static const console_cmd_t s_tg_owner = {
 
 void tg_cmd_register(void)
 {
-    s_token_arg = arg_str1(NULL, NULL, "<token>", "bot token from @BotFather");
+    s_token_arg = arg_str0(NULL, NULL, "<token>", "bot token from @BotFather");
+    s_token_clear = arg_lit0(NULL, "clear", "erase the token and stop the poller");
     s_owner_id = arg_str0(NULL, NULL, "<chat_id>", "owner chat id");
     s_owner_clear = arg_lit0(NULL, "clear", "unbind the owner chat");
     s_send_reply = arg_str0("r", NULL, "<msg>", "reply to this message id");
@@ -335,10 +358,11 @@ void tg_cmd_register(void)
     s_ack_older = arg_str0(NULL, "older", "<s>", "ack all older than s seconds (0 = all)");
     s_ack_msg = arg_str0("m", NULL, "<msg>", "ack one message id");
     if (s_send_reply == NULL || s_send_text == NULL || s_ack_older == NULL || s_ack_msg == NULL ||
-        s_token_arg == NULL || s_owner_id == NULL || s_owner_clear == NULL) {
+        s_token_arg == NULL || s_token_clear == NULL || s_owner_id == NULL || s_owner_clear == NULL) {
         ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
     }
     s_token_args[0] = s_token_arg;
+    s_token_args[1] = s_token_clear;
     s_owner_args[0] = s_owner_id;
     s_owner_args[1] = s_owner_clear;
     s_send_args[0] = s_send_reply;

@@ -36,6 +36,14 @@ const char *bridge_pair_start(char *code, uint32_t *expires_s, char *msg, size_t
 /* Store (chat != 0) or clear (0) the owner chat for `tg owner`, serialised with pairing. */
 esp_err_t bridge_owner_write(int64_t chat);
 
+/* `tg token --clear`: erase the stored bot token, serialised with pairing and the token
+ * store (s_bind). cfg then notifies: the tg state becomes unconfigured ("token cleared"), a
+ * running pairing is void, and tg_send and tg_poll go idle (no getMe/getUpdates/sendMessage
+ * from then on; a getUpdates already in flight ends within the poll timeout and its answer is
+ * dropped). Owner, Wi-Fi settings and the pending table are kept. No Wi-Fi needed;
+ * succeeds when no token is stored. ESP_OK, or the NVS error. */
+esp_err_t bridge_token_clear(void);
+
 /* Pending table access under the bridge lock (README 3.4); the ack functions publish the
  * new count (`pending` event). */
 size_t bridge_pending_list(const char *actor, pending_item_t *out, size_t max);
