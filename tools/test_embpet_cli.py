@@ -341,7 +341,7 @@ class BoardReconnectTest(unittest.TestCase):
         state["opens"] = 0
         return b, state
 
-    def test_retries_until_the_port_is_back_and_drops_buffered_input(self):
+    def test_retries_until_the_port_is_back_and_keeps_queued_events(self):
         from unittest import mock
         b, state = self.make(fail_opens=2)
         b._buf = b"stale partial line"
@@ -353,7 +353,7 @@ class BoardReconnectTest(unittest.TestCase):
         self.assertIsNot(b._s, old)
         self.assertTrue(b._s.is_open)
         self.assertEqual(b._buf, b"")
-        self.assertEqual(list(b.events(0)), [])
+        self.assertEqual(list(b.events(0)), [{"t": "evt", "seq": 1}])
         self.assertEqual(b._s.session_starts, 1)        # the new session starts with Ctrl-U
 
     def test_raises_noboard_when_the_port_never_comes_back(self):
