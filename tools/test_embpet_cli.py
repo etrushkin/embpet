@@ -533,6 +533,24 @@ class UrlAndSerialTest(unittest.TestCase):
             embpet_cli.main(["-p", "/dev/null", "--serial", "AA", "sys", "info"])
         self.assertEqual(cm.exception.code, 2)
 
+    def _reset_stderr(self, port):
+        import io
+        import embpet_cli
+        from unittest import mock
+        err = io.StringIO()
+        with mock.patch.object(embpet_cli, "monitor", lambda *a: 0), \
+                mock.patch("sys.stderr", err):
+            self.assertEqual(embpet_cli.main(["-p", port, "--monitor", "1", "--reset"]), 0)
+        return err.getvalue()
+
+    def test_reset_over_url_warns(self):
+        out = self._reset_stderr("rfc2217://lab:4001")
+        self.assertIn("warning: --reset over rfc2217://lab:4001 may not reset the chip "
+                      "(labd ignores DTR/RTS); use lab reset", out)
+
+    def test_reset_on_local_path_does_not_warn(self):
+        self.assertEqual(self._reset_stderr("/dev/ttyACM0"), "")
+
 
 def frame(seq, boot="aaaa0001"):
     return '@@{"t":"evt","seq":%d,"boot":"%s","ev":"stress"}' % (seq, boot)

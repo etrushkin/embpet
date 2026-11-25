@@ -27,6 +27,8 @@ Passthrough mode (no command is sent):
 Prints the raw serial output for SEC seconds and exits 0. With --reset the chip
 is reset first (RTS pulse on USB-Serial-JTAG), so the 2nd-stage bootloader log
 and the app banner are captured. Use it where `idf.py monitor` has no TTY.
+Over a lab console URL (rfc2217://) --reset does NOT reset the chip: labd ignores DTR/RTS
+(`ign_set_control`), so the CLI warns on stderr and goes on; use `lab reset` there.
 
 Listen mode (no command is sent):
   embpet_cli.py [-p PORT|URL | --serial SN] --listen SEC [--reset]
@@ -56,7 +58,7 @@ except ImportError:
              "or the project .venv (scripts/dev-venv.sh)")
 
 from embpet import (FRAME, Board, CmdTimeout, FrameChecker, NoBoard,  # noqa: E402,F401
-                    build_line, find_port, new_rid, open_port, parse_frame, quote,
+                    build_line, find_port, is_url, new_rid, open_port, parse_frame, quote,
                     reset_chip, split_command)
 
 
@@ -208,6 +210,9 @@ def main(argv=None):
         ap.error("--reset requires --monitor, --listen or --check-frames")
     if len(modes) > 1:
         ap.error("--monitor, --listen and --check-frames are mutually exclusive")
+    if a.reset and a.port and is_url(a.port):
+        print("warning: --reset over %s may not reset the chip (labd ignores DTR/RTS); "
+              "use lab reset" % a.port, file=sys.stderr)
     if modes:
         if a.cmd or text:
             ap.error("--monitor, --listen and --check-frames cannot be combined "
