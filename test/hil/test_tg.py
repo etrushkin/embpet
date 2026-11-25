@@ -164,6 +164,14 @@ def test_token_that_is_not_a_bot_token_is_bad_args_and_the_old_one_stays(board):
     assert board.cmd("tg status")["token"] == before
 
 
+def test_token_clear_together_with_a_token_is_bad_args_and_the_old_one_stays(board):
+    before = board.cmd("tg status")["token"]
+    res = board.cmd("tg token", "--clear", text=["123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"])
+    assert res["ok"] is False
+    assert res["err"] == "bad_args"
+    assert board.cmd("tg status")["token"] == before
+
+
 # ---- owner ----
 
 def test_owner_without_arguments_shows_the_current_owner(board):

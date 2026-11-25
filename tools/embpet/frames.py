@@ -1,5 +1,6 @@
-"""Console line building (README 3.2) and @@ frame parsing (README 3.3)."""
+"""Console line building (SPEC.md 4) and @@ frame parsing (SPEC.md 5.1)."""
 import json
+import re
 
 FRAME = "@@"
 GROUPS = ("tg", "wifi", "io", "evt", "sys")
@@ -8,10 +9,15 @@ GROUPS = ("tg", "wifi", "io", "evt", "sys")
 # Mirrors CONFIG_EMBPET_CMDLINE_MAX (main/Kconfig.projbuild); update both together.
 # Bytes of the line without the newline.
 CMDLINE_MAX = 4400
+# SPEC.md 4.2: at most 31 tokens per line, command words included.
+MAX_TOKENS = 31
+# SPEC.md 4.3: formats of -i and -a; the firmware answers bad_args to anything else.
+RID_RE = re.compile(r"[A-Za-z0-9_-]{1,32}")
+ACTOR_RE = re.compile(r"[A-Za-z0-9_-]{1,16}")
 
 
 def quote(arg):
-    """Quote one argument for the embpet console (README 3.2); newlines become \\n.
+    """Quote one argument for the embpet console (SPEC.md 4.2); newlines become \\n.
 
     Other control characters raise ValueError: the line reader ends the line at CR, erases
     at BS/DEL and drops the rest, so they would corrupt or split the command. TAB is fine
@@ -36,18 +42,24 @@ def split_command(tokens):
 def build_line(words, args=(), text=(), rid=None, actor=None):
     """Console line: WORDS [-i RID] [-a ACTOR] "ARG"... [-- "TEXT"...].
 
-    -i and -a go right after the command words (README 3.2). ARGs are quoted but are
+    -i and -a go right after the command words (SPEC.md 4.3). ARGs are quoted but are
     still parsed by argtable, so options such as "--older" work. TEXT words come after a
     bare `--`, so they are positional even when they start with '-'."""
     parts = list(words)
-    if rid:
+    if rid is not None:
+        if not RID_RE.fullmatch(rid):
+            raise ValueError("bad request id %r: [A-Za-z0-9_-]{1,32}" % (rid,))
         parts += ["-i", rid]
-    if actor:
+    if actor is not None:
+        if not ACTOR_RE.fullmatch(actor):
+            raise ValueError("bad actor %r: [A-Za-z0-9_-]{1,16}" % (actor,))
         parts += ["-a", actor]
     parts += [quote(x) for x in args]
     if text:
         parts.append("--")
         parts += [quote(x) for x in text]
+    if len(parts) > MAX_TOKENS:
+        raise ValueError("%d tokens, the firmware accepts at most %d" % (len(parts), MAX_TOKENS))
     line = " ".join(parts)
     n = len(line.encode("utf-8"))
     if n > CMDLINE_MAX:

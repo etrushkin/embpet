@@ -851,6 +851,14 @@ esp_err_t bridge_owner_write(int64_t chat)
     return err;
 }
 
+esp_err_t bridge_token_clear(void)
+{
+    xSemaphoreTake(s_bind, portMAX_DELAY);
+    esp_err_t err = cfg_clear_tg_token();       /* on_cfg: pairing void, new token generation */
+    xSemaphoreGive(s_bind);
+    return err;
+}
+
 /* Route one update. False if its event could not be recorded: the caller does not advance
  * the offset, so the update is fetched again. */
 static bool handle_update(const cJSON *u)

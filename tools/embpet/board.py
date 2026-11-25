@@ -5,7 +5,7 @@ import string
 import time
 
 from .frames import build_line, parse_frame
-from .serialport import find_port, open_port, reset_chip
+from .serialport import NoBoard, find_port, open_port, port_serial, reset_chip
 
 EVENT_BACKLOG = 1000
 SESSION_START = b"\x15\n"
@@ -15,29 +15,32 @@ class CmdTimeout(TimeoutError):
     """No matching res frame arrived in time."""
 
 
-class NoBoard(RuntimeError):
-    """No serial port found."""
-
-
 def new_rid():
     return "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(8))
 
 
 class Board:
-    """Opens the port without resetting the chip (README 3.1).
+    """Opens the port without resetting the chip (SPEC.md 3.2).
 
     cmd() sends one command and returns its res frame (matched by rid). evt frames seen
     meanwhile are kept (the last EVENT_BACKLOG) and are yielded first by events(). The
     optional on_line(text) / on_event(frame) callbacks see every console line / evt frame
     as it arrives."""
 
-    def __init__(self, port=None, serial_cls=None, reset=False, session_start=True):
-        port = port or find_port()
+    def __init__(self, port=None, serial_cls=None, reset=False, session_start=True,
+                 serial_number=None):
+        port = port or find_port(serial_number)
         if not port:
-            raise NoBoard("no board found (/dev/cu.usbmodem*); pass a port")
+            raise NoBoard("no board found (/dev/cu.usbmodem*, /dev/ttyACM*); pass a port")
         self.port = port
+        # USB serial number (SPEC.md 2): reconnect() finds the board again by it, because
+        # the device node can change or another board can take the old one.
+        self.serial_number = serial_number or port_serial(port)
+        self._last = None               # (boot, seq) of the newest frame seen (SPEC.md 7.5)
+        self._seen = collections.OrderedDict()   # (boot, seq) of events already delivered
         self.on_line = None
         self.on_event = None
+        self.last_replay = None         # the res of the last `evt since` replay
         self._events = collections.deque(maxlen=EVENT_BACKLOG)
         self._buf = b""
         self._serial_cls = serial_cls
@@ -53,7 +56,7 @@ class Board:
             raise
 
     def _start_session(self):
-        """Ctrl-U then newline (README 3.2): discards a partial line a previous session left
+        """Ctrl-U then newline (SPEC.md 3.2): discards a partial line a previous session left
         in the firmware's line buffer or USB ring; the newline ends the now empty line, which
         gets no response."""
         self._s.write(SESSION_START)
@@ -64,27 +67,44 @@ class Board:
 
     def reconnect(self, delay=3.0, timeout=30.0):
         """Reopen the port after a chip reset that re-enumerates the USB device (e.g.
-        `sys reboot`): wait DELAY seconds, then retry the open until TIMEOUT. Buffered input
-        and queued events are dropped. Raises NoBoard when the port does not come back."""
+        `sys reboot`): wait DELAY seconds, then retry until TIMEOUT. The board is found
+        again by its USB serial number (the device node may change; with several boards
+        another one may hold the old path), or by the old path when the number is unknown.
+        Buffered partial input is dropped; queued events are kept. With a session start,
+        the events missed meanwhile are replayed with `evt since <last seq>` (SPEC.md 7.5:
+        `evt since 0` after a new boot) and deduplicated on (boot, seq). Raises NoBoard
+        when the port does not come back, AmbiguousPort when several boards match."""
         try:
             self._s.close()
         except OSError:
             pass
         time.sleep(delay)
         deadline = time.monotonic() + timeout
+        prev = self._last
         while True:
             try:
-                # serial.SerialException is an OSError subclass, so this covers it
-                self._s = open_port(self.port, serial_cls=self._serial_cls)
-                break
+                port = find_port(self.serial_number) if self.serial_number else self.port
+                if port:
+                    # serial.SerialException is an OSError subclass, so this covers it
+                    self._s = open_port(port, serial_cls=self._serial_cls)
+                    self.port = port
+                    break
             except OSError:
-                if time.monotonic() >= deadline:
-                    raise NoBoard("port %s did not come back" % self.port)
-                time.sleep(0.5)
+                pass
+            if time.monotonic() >= deadline:
+                raise NoBoard("board %s did not come back" % (self.serial_number or self.port))
+            time.sleep(0.5)
         self._buf = b""
-        self._events.clear()
         if self._session_start:
             self._start_session()
+            if prev is not None:
+                self._replay(prev)
+
+    def _replay(self, prev):
+        """After a reopen: `evt since` the last seq seen, or 0 when the boot id changed."""
+        info = self.wait_ready()
+        since = prev[1] if prev[0] == info.get("boot") else 0
+        self.last_replay = self.cmd("evt since", str(since))
 
     def __enter__(self):
         return self
@@ -128,7 +148,27 @@ class Board:
         for text in self.lines(seconds):
             f = parse_frame(text)
             if f is not None:
+                self._track(f)
                 yield f
+
+    def _track(self, f):
+        """Remember the newest (boot, seq) for the replay after a reconnect."""
+        boot, seq = f.get("boot"), f.get("seq")
+        if isinstance(boot, str) and isinstance(seq, int) and not isinstance(seq, bool):
+            if self._last is None or self._last[0] != boot or seq > self._last[1]:
+                self._last = (boot, seq)
+
+    def _is_new(self, f):
+        """False for an evt already delivered (same boot and seq), e.g. in a replay."""
+        key = (f.get("boot"), f.get("seq"))
+        if key[0] is None or key[1] is None:
+            return True
+        if key in self._seen:
+            return False
+        self._seen[key] = None
+        if len(self._seen) > 4096:
+            self._seen.popitem(last=False)
+        return True
 
     def cmd(self, command, *args, text=(), actor=None, timeout=15.0, rid=None):
         """Send one command and return its res frame as a dict (ok may be false).
@@ -161,6 +201,8 @@ class Board:
                 pass
 
     def _push_event(self, f):
+        if not self._is_new(f):
+            return
         if self.on_event:
             self.on_event(f)
         self._events.append(f)
@@ -171,7 +213,7 @@ class Board:
         while self._events:
             yield self._events.popleft()
         for f in self.frames(seconds):
-            if f.get("t") == "evt":
+            if f.get("t") == "evt" and self._is_new(f):
                 if self.on_event:
                     self.on_event(f)
                 yield f

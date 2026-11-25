@@ -22,7 +22,7 @@ board every test is skipped, unless `--require-board` or `EMBPET_PORT` is given.
 | `test_protocol.py` | frame format, `seq`/`boot`, rid and actor echo, errors, bad quoting, `too_long`, `evt since` (replay, verbatim, bad seq), reboot and the boot event |
 | `test_io.py` | `io get/set/pulse` (timing through `remaining_ms` and the observed pulse end), re-pulse, cancel by set/toggle, error cases, `io boot` levels across `sys reboot`, `io in` shape, `io debounce` settings and persistence |
 | `test_wifi.py` | `wifi status`, `wifi txpower`, `wifi set` reconnect, no password in output at debug level, wrong password -> down -> recovery, credentials across a reboot |
-| `test_tg.py` | `tg status` (masked token), `tg pending`/`tg ack` error handling, `tg send` checks that fail before the network (`bad_args`, `too_long`, `not_configured`), `tg token` bad input, `tg owner` argument checks |
+| `test_tg.py` | `tg status` (masked token), `tg pending`/`tg ack` error handling, `tg send` checks that fail before the network (`bad_args`, `too_long`, `not_configured`), `tg token` bad input (and `tg token --clear` with a token -> `bad_args`), `tg owner` argument checks |
 | `test_tg_offline.py` | one Wi-Fi outage shared by the tests: `tg send` -> `offline` (with a placeholder owner chat that is cleared again), `not_configured` first, `tg token` -> `offline`, `tg owner` set/show/clear |
 | `test_tg_owner.py` | marker `owner`: real sends to the paired owner and human replies |
 | `test_io_loopback.py` | marker `loopback`: input events through OUTn -> opto -> IN wiring |

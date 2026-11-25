@@ -93,6 +93,7 @@ scripts/         bootstrap.sh, export.sh, test_host.sh, dev-venv.sh
   3. It emits `evt reply`, marks the message answered (which emits `pending`), and advances the offset.
   4. If the message is not a reply, or can't be routed, `tg_send` posts the hint text.
 - **Pairing:** `tg pair` arms a 6-digit code (5 min). `tg_poll` judges every update with `pair_check` BEFORE routing (with no owner, routing would ignore everything). A right `/start <code>` from any chat stores the owner (under the same mutex as `tg owner`, `tg pair` and the token store), emits `paired`, and queues a best-effort plain confirmation for `tg_send`.
+- **Clearing the token:** `tg token --clear` erases the token under the same mutex (`bridge_token_clear`). The cfg callbacks do the rest: tg state `unconfigured` (`token cleared`), pairing void, token generation bumped, so `tg_poll` idles (its ready generation no longer matches) and `tg_send` skips setup; the same path as boot without a token and the test command `tg t_untoken`.
 - **Online notice:** `tg_send` posts it itself the first time Telegram is online in a boot, if an owner is set then.
 
 ---

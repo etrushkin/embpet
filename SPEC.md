@@ -347,7 +347,7 @@ the port open, and the last **32** (at most 16 KB of frames) are kept in RAM for
 |---|---|---|
 | `boot` | `fw` (string), `idf` (string), `reset_reason` (string, §7.6) | Once, at start |
 | `wifi` | `state` (`"up"`/`"down"`); `ip` (string) and `rssi` (dBm, integer) only when up | Wi-Fi goes up or down, or the IP changes (not on every reconnect attempt) |
-| `tg` | `state` (`"online"`/`"offline"`/`"unconfigured"`/`"auth_error"`), `detail` (string) | Telegram reachability or the bot behind the token changes. `detail` is for humans, e.g. `"@mybot"`, `"wifi down"`, `"token changed"`, `"timeout"`, `"no token"`. |
+| `tg` | `state` (`"online"`/`"offline"`/`"unconfigured"`/`"auth_error"`), `detail` (string) | Telegram reachability or the bot behind the token changes. `detail` is for humans, e.g. `"@mybot"`, `"wifi down"`, `"token changed"`, `"timeout"`, `"no token"` (never configured), `"token cleared"` (`tg token --clear`). |
 | `input` | `pin` (0–2), `active` (0/1), `extra` (integer ≥ 0) | A debounced input change (§8.2) |
 | `pending` | `count` (integer) | The number of unanswered messages changed |
 | `reply` | `actor`, `to` (message id replied to), `msg` (the owner's message id), `text`, `date` (unix seconds), `src` (`"table"`/`"prefix"`) | The owner replied to an actor's message (§8.3) |
@@ -443,12 +443,21 @@ Payload fields are listed for `ok: true`. All commands also accept `-i` and `-a`
   `owner` (chat id integer, or `null`), `token` (masked, e.g. `"123456:AA…xyz"`, `""` if
   unset), `pending` (count).
 
-**`tg token [--] <token>`**
+**`tg token [--] <token>`**, **`tg token --clear`**
 - Checks the token with Telegram (`getMe`), and only if accepted stores it and restarts the
   poller. Wi-Fi must be up.
 - Payload: `bot` (username), `token` (masked).
 - Errors: `bad_args` (malformed), `offline`, `auth_error` (rejected; the old token stays),
   `timeout`, `busy`, `internal`.
+- `--clear` erases the stored token and stops the Telegram poller and sender: no `getMe`,
+  `getUpdates` or `sendMessage` afterwards (a `getUpdates` already in flight ends within the
+  poll timeout and its answer is dropped). A pairing in progress is void. The owner chat, the
+  Wi-Fi settings and the pending table are kept. It needs no Wi-Fi and is idempotent: with no
+  token stored it also succeeds. Payload: `token` (`""`). Emits `tg` `{state:
+  "unconfigured", detail: "token cleared"}` when the state changes. Afterwards `tg status`
+  shows `state` `"unconfigured"` and `token` `""`, `tg send` and `tg pair` fail with
+  `not_configured`, and `tg token <token>` enables the bridge again. Errors: `bad_args` (a
+  token together with `--clear`), `internal` (NVS failure).
 - The token is a secret: never put it in a process argument list or log on the host
   (`tools/tg_from_env.py` sends it in-process).
 

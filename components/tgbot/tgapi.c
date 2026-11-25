@@ -115,7 +115,8 @@ static void on_cfg_change(cfg_key_t key, void *ctx)
     if (have_token()) {
         state_set_tg(STATE_TG_OFFLINE, NULL, "token changed");
     } else {
-        state_set_tg(STATE_TG_UNCONFIGURED, NULL, "no token");
+        /* Only a cleared token gets here: boot without one is set in tgapi_init. */
+        state_set_tg(STATE_TG_UNCONFIGURED, NULL, "token cleared");
     }
 }
 
