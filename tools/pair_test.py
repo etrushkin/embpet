@@ -20,6 +20,9 @@ a code), persistence across `sys reboot`, exactly one online notice per boot ove
 reboots (not again after a Wi-Fi bounce, none without an owner), and that the token's
 secret part never appears in console output under `sys log debug`.
 
+The owner stored on the board at start is written back last, also after a failed check, an
+exception or Ctrl-C, and read back ("teardown: owner restored"); every step clears it meanwhile.
+
 Exit 0 = no check failed, 1 = a check failed, 2 = setup error. Output is check names with
 PASS/FAIL and INFO lines; the token, Wi-Fi password and pairing codes are never printed.
 """
@@ -285,6 +288,7 @@ def main():
     x = X(port, token, ssid, env["WIFI_PASS"], 0, checks)
     x.open()
     try:
+        x.save_owner()
         if x.wifi_state() != "up":
             x.cmd("wifi set", text=[ssid, env["WIFI_PASS"]] if env["WIFI_PASS"] else [ssid])
             if not checks.check("setup: wifi up", x.wait_wifi("up", 60)):
@@ -304,6 +308,7 @@ def main():
                 except Exception:
                     pass
     finally:
+        x.restore_owner()
         x.close()
     failed = [r["check"] for r in checks.results if not r["ok"]]
     print(json.dumps({"ok": checks.ok(), "passed": len(checks.results) - len(failed),

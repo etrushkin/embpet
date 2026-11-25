@@ -17,7 +17,9 @@ Suites:
           works (test fault: bounded backoff, no tg event flapping, one getMe probe per
           Wi-Fi reconnect), and the stack headroom of the console, tg_poll and tg_send
           tasks. Steps that change the token, owner, Wi-Fi or fault restore them in a
-          finally block.
+          finally block; at the very end (also after a failed check, an exception or
+          Ctrl-C) the owner found at setup is written back last, and the check
+          "teardown: owner restored" reads it back.
   human   README 3.5 with the owner: sends [A] and [B] to the owner chat, asks the owner to
           Reply in Telegram, checks the reply events (actor, to, src table), the pending
           events, the hint for a message without Reply, then reboots the board and checks
@@ -61,6 +63,7 @@ class Ctx:
         self.pending = []
         self.events = []
         self.b = None
+        self.owner0 = None              # (chat_id or None,) as found at setup; None = unread
 
     def open(self):
         self.b = Board(self.port)
@@ -127,6 +130,32 @@ class Ctx:
                 return True
             self.pump(1.0)
         return False
+
+    def save_owner(self):
+        """Remember the stored owner (chat_id, may be null) before any step changes it."""
+        r = self.cmd("tg owner")
+        if "chat_id" not in r:
+            return self.c.check("setup: owner read", False, r)
+        self.owner0 = (r["chat_id"],)
+        return True
+
+    def restore_owner(self):
+        """Write the owner found at setup back, as the very last board command, and check
+        it by reading it back. Negative ids need the text form. Never raises."""
+        if self.owner0 is None:
+            return
+        want = self.owner0[0]
+        try:
+            if want is None:
+                self.cmd("tg owner", "--clear")
+            else:
+                self.cmd("tg owner", text=[str(want)])
+            got = self.cmd("tg owner").get("chat_id", "unreadable")
+        except Exception as e:
+            got = "error %s" % type(e).__name__
+        ok = self.c.check("teardown: owner restored", got == want, None if got == want else got)
+        if ok:
+            print("INFO owner restored to %s" % ("null" if want is None else want), flush=True)
 
     def set_token(self):
         code, _, err = T.set_token(self.token, cmd="tg t_token", board=self.b)
@@ -656,6 +685,7 @@ def main():
     x = Ctx(port, token, ssid, env["WIFI_PASS"], chat, checks)
     x.open()
     try:
+        x.save_owner()
         if x.wifi_state() != "up":
             x.cmd("wifi set", text=[ssid, env["WIFI_PASS"]] if env["WIFI_PASS"] else [ssid])
             if not checks.check("setup: wifi up", x.wait_wifi("up", 60)):
@@ -665,6 +695,7 @@ def main():
         if a.suite in ("human", "all"):
             suite_human(x, a.wait)
     finally:
+        x.restore_owner()
         x.close()
     failed = [r["check"] for r in checks.results if not r["ok"]]
     print(json.dumps({"ok": checks.ok(), "passed": len(checks.results) - len(failed),
