@@ -2,10 +2,10 @@
 console quoting, Board.cmd() / Board.events(). Used by tools/embpet_cli.py and test/hil."""
 from .board import Board, CmdTimeout, NoBoard, new_rid
 from .frames import FRAME, FrameChecker, build_line, parse_frame, quote, split_command
-from .serialport import (AmbiguousPort, find_port, list_candidates, list_ports, open_port,
-                         port_serial, reset_chip)
+from .serialport import (AmbiguousPort, find_port, is_url, list_candidates, list_ports,
+                         open_port, port_serial, reset_chip)
 
 __all__ = ["Board", "CmdTimeout", "NoBoard", "new_rid", "FRAME", "FrameChecker",
-           "build_line", "parse_frame", "quote", "split_command", "find_port",
+           "build_line", "parse_frame", "quote", "split_command", "find_port", "is_url",
            "list_ports", "open_port", "reset_chip", "AmbiguousPort", "list_candidates",
            "port_serial"]

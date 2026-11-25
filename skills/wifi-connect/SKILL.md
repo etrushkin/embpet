@@ -9,7 +9,7 @@ Provision Wi-Fi on the board through the serial CLI defined in `README.md` §3. 
 
 ## Preconditions
 
-1. **Board attached:** `ls /dev/cu.usbmodem*`. The dev unit is usually `/dev/cu.usbmodem11101`, a USB-Serial/JTAG device with VID 303A and PID 1001. If several ports are listed, pass `-p`.
+1. **Board attached:** `ls /dev/cu.usbmodem*`. The dev unit is usually `/dev/cu.usbmodem11101`, a USB-Serial/JTAG device with VID 303A and PID 1001. If several ports are listed, pass `-p` or `--serial SN` (the USB serial number). In the fwh lab there is no local port: use `-p "$LAB_CONSOLE_URL"` (an `rfc2217://` URL) inside `lab run`.
 2. **Port free:** close any `idf.py monitor`, `screen`, or broker that holds the port; only one process can open it. Agents run every board command through `scripts/hw.sh`, which holds the board lock.
 3. **Firmware running:** `scripts/hw.sh python tools/embpet_cli.py sys info` must return `"ok":true`. A timeout means the embpet firmware isn't flashed or the board is stuck. Stop and report that; don't retry endlessly.
 4. **Credentials present:** `.env.local` defines `WIFI_SSID` and `WIFI_PASS`. If it's missing, copy `.env.example` and ask the user for the values.

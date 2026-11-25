@@ -5,7 +5,7 @@ import string
 import time
 
 from .frames import build_line, parse_frame
-from .serialport import NoBoard, find_port, open_port, port_serial, reset_chip
+from .serialport import NoBoard, find_port, is_url, open_port, port_serial, reset_chip
 
 EVENT_BACKLOG = 1000
 SESSION_START = b"\x15\n"
@@ -31,7 +31,11 @@ class Board:
                  serial_number=None):
         port = port or find_port(serial_number)
         if not port:
-            raise NoBoard("no board found (/dev/cu.usbmodem*, /dev/ttyACM*); pass a port")
+            if serial_number:
+                raise NoBoard("no USB serial device with serial number %s; "
+                              "pass -p PORT_OR_URL" % serial_number)
+            raise NoBoard("no board found (/dev/cu.usbmodem*, /dev/ttyACM*); pass -p PORT "
+                          "or -p URL (rfc2217://host:port), or --serial SN")
         self.port = port
         # USB serial number (SPEC.md 2): reconnect() finds the board again by it, because
         # the device node can change or another board can take the old one.
@@ -65,15 +69,18 @@ class Board:
     def close(self):
         self._s.close()
 
-    def reconnect(self, delay=3.0, timeout=30.0):
+    def reconnect(self, delay=None, timeout=30.0):
         """Reopen the port after a chip reset that re-enumerates the USB device (e.g.
-        `sys reboot`): wait DELAY seconds, then retry until TIMEOUT. The board is found
+        `sys reboot`): wait DELAY seconds (default 3 s for a device path, 0 for a URL, which
+        is reopened as it is), then retry until TIMEOUT. The board is found
         again by its USB serial number (the device node may change; with several boards
-        another one may hold the old path), or by the old path when the number is unknown.
-        Buffered partial input is dropped; queued events are kept. With a session start,
+        another one may hold the old path), or by the old path (or URL) when the number is
+        unknown. Buffered partial input is dropped; queued events are kept. With a session start,
         the events missed meanwhile are replayed with `evt since <last seq>` (SPEC.md 7.5:
         `evt since 0` after a new boot) and deduplicated on (boot, seq). Raises NoBoard
         when the port does not come back, AmbiguousPort when several boards match."""
+        if delay is None:
+            delay = 0.0 if is_url(self.port) else 3.0
         try:
             self._s.close()
         except OSError:
