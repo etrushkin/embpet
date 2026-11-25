@@ -17,6 +17,11 @@ def list_ports():
     return sorted(glob.glob("/dev/cu.usbmodem*")) + sorted(glob.glob("/dev/ttyACM*"))
 
 
+def is_url(port):
+    """True for a pyserial URL (rfc2217://, socket://, loop://, ...), false for a device path."""
+    return "://" in str(port)
+
+
 def port_serial(device):
     """USB serial number of DEVICE (SPEC.md 2: the chip's MAC, unique per board), or None."""
     try:
@@ -59,8 +64,17 @@ def find_port(serial_number=None, candidates=None):
     return found[0][0]
 
 
-def open_port(port, serial_cls=None):
-    """Open the port without resetting the chip.
+def open_port(port, serial_cls=None, for_url=None):
+    """Open the port (a device path or a pyserial URL) without resetting the chip.
+
+    A PORT containing "://" (rfc2217://host:port, socket://, loop://) is created with
+    serial.serial_for_url(port, do_not_open=True) (FOR_URL replaces that function in tests)
+    and gets the same line sequence as a local port. SERIAL_CLS, when given, wins over both.
+    On rfc2217:// pyserial's open() skips the DTR update (dsrdtr) and sends only RTS=0, then
+    DTR=0 follows after the open: the RFC 2217 server sees RTS first, then DTR, the same
+    (1,0) -> (0,0) order as locally. The initial state is the server's own: the lines are not
+    pulsed on the client's behalf, but whether the server resets the chip on its own open is
+    up to the server.
 
     The USB-Serial-JTAG resets the chip while RTS=1 and DTR=0. macOS asserts both lines
     when the port opens, and a plain pyserial open() then clears DTR before RTS, so the
@@ -69,8 +83,11 @@ def open_port(port, serial_cls=None):
     other effect) and clears only RTS; DTR is cleared afterwards:
     (1,1) -> (1,0) -> (0,0). DTR=1/RTS=0 only selects the boot mode for a later reset.
     """
-    s = (serial_cls or serial.Serial)()
-    s.port = port
+    if serial_cls is None and is_url(port):
+        s = (for_url or serial.serial_for_url)(port, do_not_open=True)
+    else:
+        s = (serial_cls or serial.Serial)()
+        s.port = port
     s.baudrate = 115200
     s.timeout = 0.2
     s.dtr = False

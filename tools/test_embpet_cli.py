@@ -440,6 +440,118 @@ class CliMainTest(unittest.TestCase):
             self.run_main(["--listen", "1", "sys", "info"])
 
 
+class UrlAndSerialTest(unittest.TestCase):
+    """pyserial URLs (rfc2217://), --serial selection and -p/--serial exclusivity."""
+
+    def test_url_goes_through_serial_for_url_with_reset_free_order(self):
+        seen = []
+
+        def for_url(url, do_not_open=False, **kw):
+            seen.append((url, do_not_open))
+            s = FakePosixSerial()
+            s.port = url
+            return s
+
+        s = open_port("rfc2217://lab:4001", for_url=for_url)
+        self.assertEqual(seen, [("rfc2217://lab:4001", True)])
+        self.assertTrue(s.is_open)
+        self.assertNotIn((0, 1), s.lines)
+        self.assertEqual(s.lines[-1], (0, 0))
+
+    def test_real_loop_url_opens(self):
+        s = open_port("loop://")
+        self.assertTrue(s.is_open)
+        s.close()
+
+    def test_local_path_does_not_use_serial_for_url(self):
+        def boom(*a, **kw):
+            raise AssertionError("serial_for_url used for a device path")
+
+        s = open_port("/dev/null", serial_cls=FakePosixSerial, for_url=boom)
+        self.assertTrue(s.is_open)
+
+    def test_board_on_url_and_reconnect_reopens_same_url(self):
+        from unittest import mock
+        opened = []
+
+        def for_url(url, do_not_open=False, **kw):
+            opened.append(url)
+            s = FakeBoardSerial()
+            s.port = url
+            return s
+
+        with mock.patch("embpet.serialport.serial.serial_for_url", for_url):
+            b = Board("rfc2217://lab:4001")
+            with mock.patch("embpet.board.time.sleep") as sl:
+                b.reconnect()
+            self.assertEqual(opened, ["rfc2217://lab:4001"] * 2)
+            self.assertNotIn(mock.call(3.0), sl.call_args_list)   # no re-enumeration wait
+            self.assertEqual(b._s.session_starts, 1)
+
+    def test_find_port_by_serial_number(self):
+        from unittest import mock
+        from embpet import find_port
+        ports = [("/dev/ttyACM1", "BB"), ("/dev/ttyACM0", "AA")]
+        with mock.patch("embpet.serialport.list_candidates", lambda: ports):
+            self.assertEqual(find_port("AA"), "/dev/ttyACM0")
+            self.assertIsNone(find_port("ZZ"))
+
+    def test_board_serial_number_selects_port_and_reports_missing(self):
+        from unittest import mock
+        from embpet import NoBoard
+        with mock.patch("embpet.board.find_port", lambda sn=None: "/dev/null" if sn == "AA" else None):
+            b = Board(serial_number="AA", serial_cls=FakeBoardSerial)
+            self.assertEqual(b.port, "/dev/null")
+            with self.assertRaises(NoBoard) as cm:
+                Board(serial_number="ZZ", serial_cls=FakeBoardSerial)
+            self.assertIn("ZZ", str(cm.exception))
+            # a port plus a serial number is allowed: reconnect() finds the board by the number
+            b = Board("/dev/null", serial_number="AA", serial_cls=FakeBoardSerial)
+            self.assertEqual((b.port, b.serial_number), ("/dev/null", "AA"))
+
+    def test_noboard_message_mentions_url_and_serial(self):
+        from unittest import mock
+        from embpet import NoBoard
+        with mock.patch("embpet.board.find_port", lambda sn=None: None):
+            with self.assertRaises(NoBoard) as cm:
+                Board()
+        self.assertIn("-p URL", str(cm.exception))
+        self.assertIn("--serial", str(cm.exception))
+
+    def test_cli_serial_resolves_port_and_excludes_p(self):
+        import embpet_cli
+        from unittest import mock
+        seen = []
+        with mock.patch.object(embpet_cli, "find_port", lambda sn=None: "/dev/ttyACM7"), \
+                mock.patch.object(embpet_cli, "run_command",
+                                  lambda a, w, ar, t: seen.append(a.port) or 0):
+            self.assertEqual(embpet_cli.main(["--serial", "AA", "sys", "info"]), 0)
+        self.assertEqual(seen, ["/dev/ttyACM7"])
+        with mock.patch.object(embpet_cli, "find_port", lambda sn=None: None):
+            self.assertEqual(embpet_cli.main(["--serial", "AA", "sys", "info"]), 2)
+        with self.assertRaises(SystemExit) as cm:
+            embpet_cli.main(["-p", "/dev/null", "--serial", "AA", "sys", "info"])
+        self.assertEqual(cm.exception.code, 2)
+
+    def _reset_stderr(self, port):
+        import io
+        import embpet_cli
+        from unittest import mock
+        err = io.StringIO()
+        with mock.patch.object(embpet_cli, "monitor", lambda *a: 0), \
+                mock.patch("sys.stderr", err):
+            self.assertEqual(embpet_cli.main(["-p", port, "--monitor", "1", "--reset"]), 0)
+        return err.getvalue()
+
+    def test_reset_over_url_warns(self):
+        out = self._reset_stderr("rfc2217://lab:4001")
+        self.assertIn("warning: --reset over rfc2217://lab:4001 may not reset the chip "
+                      "(labd ignores DTR/RTS); use lab reset", out)
+
+    def test_reset_on_local_path_does_not_warn(self):
+        self.assertEqual(self._reset_stderr("/dev/ttyACM0"), "")
+
+
 def frame(seq, boot="aaaa0001"):
     return '@@{"t":"evt","seq":%d,"boot":"%s","ev":"stress"}' % (seq, boot)
 

@@ -2,7 +2,12 @@
 """Send one CLI command to an embpet board and print its @@ response frame.
 
 Usage:
-  embpet_cli.py [-p PORT] [-t SEC] [-a ACTOR] [--show-events] [--raw] CMD [ARG ...] [-- TEXT ...]
+  embpet_cli.py [-p PORT|URL | --serial SN] [-t SEC] [-a ACTOR] [--show-events] [--raw] CMD [ARG ...] [-- TEXT ...]
+
+PORT is a device path (/dev/cu.usbmodem11101) or a pyserial URL, e.g. the lab console
+(`-p "$LAB_CONSOLE_URL"`, rfc2217://host:port). --serial SN picks the local USB device whose
+USB serial number is SN (mutually exclusive with -p). Without either, the only
+/dev/cu.usbmodem* or /dev/ttyACM* port is used (several: pass -p or --serial). A URL gets the same reset-free DTR/RTS order.
 
 Each ARG and TEXT is quoted and escaped for the embpet console (README 3.2), so values
 with spaces or quotes are safe:  embpet_cli.py wifi set -- "my ssid" 'p"ss'
@@ -17,19 +22,21 @@ Prints the response JSON on stdout. Exit codes: 0 = ok:true, 1 = ok:false,
 2 = timeout / serial error. See README.md section 3 for the protocol.
 
 Passthrough mode (no command is sent):
-  embpet_cli.py [-p PORT] --monitor SEC [--reset]
+  embpet_cli.py [-p PORT|URL | --serial SN] --monitor SEC [--reset]
 
 Prints the raw serial output for SEC seconds and exits 0. With --reset the chip
 is reset first (RTS pulse on USB-Serial-JTAG), so the 2nd-stage bootloader log
 and the app banner are captured. Use it where `idf.py monitor` has no TTY.
+Over a lab console URL (rfc2217://) --reset does NOT reset the chip: labd ignores DTR/RTS
+(`ign_set_control`), so the CLI warns on stderr and goes on; use `lab reset` there.
 
 Listen mode (no command is sent):
-  embpet_cli.py [-p PORT] --listen SEC [--reset]
+  embpet_cli.py [-p PORT|URL | --serial SN] --listen SEC [--reset]
 
 Prints every evt frame as one JSON line on stdout for SEC seconds (0 = until Ctrl-C).
 
 Frame check (no command is sent):
-  embpet_cli.py [-p PORT] --check-frames SEC [--reset]
+  embpet_cli.py [-p PORT|URL | --serial SN] --check-frames SEC [--reset]
 
 Reads SEC seconds, parses every `@@` line as JSON and checks that seq is strictly
 increasing per boot id. A mid-line '@@' is bad only if the rest of the line parses as a
@@ -51,7 +58,7 @@ except ImportError:
              "or the project .venv (scripts/dev-venv.sh)")
 
 from embpet import (FRAME, Board, CmdTimeout, FrameChecker, NoBoard,  # noqa: E402,F401
-                    build_line, find_port, new_rid, open_port, parse_frame, quote,
+                    build_line, find_port, is_url, new_rid, open_port, parse_frame, quote,
                     reset_chip, split_command)
 
 
@@ -161,7 +168,12 @@ def main(argv=None):
         argv, text = argv[:i], argv[i + 1:]
 
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0], allow_abbrev=False)
-    ap.add_argument("-p", "--port")
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument("-p", "--port", metavar="PORT|URL",
+                   help="device path or pyserial URL (rfc2217://host:port, e.g. "
+                        "$LAB_CONSOLE_URL)")
+    g.add_argument("--serial", metavar="SN",
+                   help="select the local USB device with this USB serial number")
     ap.add_argument("-t", "--timeout", type=float, default=15.0)
     ap.add_argument("-a", "--actor", help="actor id added as -a")
     ap.add_argument("--show-events", action="store_true",
@@ -184,11 +196,23 @@ def main(argv=None):
                     "after a bare --)")
     a = ap.parse_args(argv)
 
+    if a.serial:
+        try:
+            a.port = find_port(a.serial)
+        except NoBoard as e:            # AmbiguousPort: several ports report this number
+            return _serial_error(e)
+        if not a.port:
+            return _serial_error(NoBoard("no USB serial device with serial number %s; "
+                                         "pass -p PORT_OR_URL" % a.serial))
+
     modes = [m for m in (a.monitor, a.listen, a.check_frames) if m is not None]
     if a.reset and not modes:
         ap.error("--reset requires --monitor, --listen or --check-frames")
     if len(modes) > 1:
         ap.error("--monitor, --listen and --check-frames are mutually exclusive")
+    if a.reset and a.port and is_url(a.port):
+        print("warning: --reset over %s may not reset the chip (labd ignores DTR/RTS); "
+              "use lab reset" % a.port, file=sys.stderr)
     if modes:
         if a.cmd or text:
             ap.error("--monitor, --listen and --check-frames cannot be combined "
