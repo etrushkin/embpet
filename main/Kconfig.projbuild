@@ -51,12 +51,22 @@ menu "embpet"
         help
             Long-poll timeout of the getUpdates request, README 2.1.
 
+    config EMBPET_TG_CONNECT_TIMEOUT_MS
+        int "Telegram connect timeout (ms)"
+        default 8000
+        range 1000 60000
+        help
+            Timeout of the connect to the Bot API (DNS, TCP, TLS handshake) on both
+            connections, README 2.1. A failed connect is tried once more after 500 ms.
+            The read timeout is separate: the long poll timeout + 10 s for a long poll,
+            the send timeout for every other call.
+
     config EMBPET_TG_SEND_TIMEOUT_MS
         int "Telegram sendMessage timeout (ms)"
         default 10000
         range 1000 120000
         help
-            Timeout of the send connection to the Bot API, README 2.1.
+            Read (and write) timeout of every Bot API call except a long poll, README 2.1.
 
     config EMBPET_MAX_TEXT_BYTES
         int "Maximum message text size (bytes)"

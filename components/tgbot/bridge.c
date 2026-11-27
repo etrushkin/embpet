@@ -10,8 +10,9 @@
  *
  * Getting back online, without flapping: after a failed getUpdates or a Wi-Fi drop the
  * poller's next getUpdates uses timeout 0, so a success turns tg online at once rather
- * than after a whole long poll; failures back off (1, 2, 4 .. 30 s) and only Wi-Fi changes
- * and token readiness wake the poller early, never tg transitions. After a Wi-Fi reconnect
+ * than after a whole long poll; network failures back off (0.5, 1, 2, 4, 8, then 10 s;
+ * server errors 1, 2, 4 .. 30 s) and only Wi-Fi changes and token readiness wake the
+ * poller early, never tg transitions. After a Wi-Fi reconnect
  * tg_send also probes once with getMe (backing off until it succeeds), because the poller
  * may still be blocked in a long poll from before the drop. Nothing else re-arms that
  * probe, so a getUpdates that keeps failing while getMe works leaves tg offline instead of
@@ -941,14 +942,7 @@ static tg_status_t get_updates(tgapi_conn_t *conn, int64_t offset, bool quick, t
     if (!quick) {
         return tgapi_get_updates(conn, offset, r);
     }
-    char *body = tg_build_get_updates(offset, TG_UPDATES_LIMIT, 0);
-    if (body == NULL) {
-        memset(r, 0, sizeof(*r));
-        return TG_ERR_NO_MEM;
-    }
-    tg_status_t st = tgapi_call(conn, "getUpdates", body, r);
-    cJSON_free(body);
-    return st;
+    return tgapi_get_updates_quick(conn, offset, r);
 }
 
 static void poll_task(void *arg)

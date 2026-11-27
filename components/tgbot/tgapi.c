@@ -25,6 +25,7 @@ static const char *TAG = "tgapi";
 #define URL_SIZE     (sizeof(API_BOT_URL) + CFG_TOKEN_MAX + 1 + METHOD_MAX)
 #define PEEK_BYTES   256                 /* read from a too-large body to find its first id */
 #define IDLE_CLOSE_US (60 * 1000000LL)   /* reconnect instead of reusing a session idle this long */
+#define SEND_READ_MS  ((uint32_t)CONFIG_EMBPET_TG_SEND_TIMEOUT_MS)  /* read timeout, not a long poll */
 
 /* The tags whose DEBUG output can contain the request line (and so the token), plus the
  * transport and TLS tags below them. esp_http_client, tcp_transport and esp-tls are also
@@ -156,6 +157,7 @@ esp_err_t tgapi_init(void)
 
 tgapi_conn_t *tgapi_conn_create(tgapi_conn_kind_t kind)
 {
+    (void)kind;
     tgapi_conn_t *c = calloc(1, sizeof(*c));
     if (c == NULL) {
         return NULL;
@@ -163,15 +165,17 @@ tgapi_conn_t *tgapi_conn_create(tgapi_conn_kind_t kind)
     const esp_http_client_config_t cfg = {
         .url = API_HOST_URL,
         .method = HTTP_METHOD_POST,
-        .timeout_ms = kind == TGAPI_CONN_POLL ? (CONFIG_EMBPET_TG_POLL_TIMEOUT_S + 10) * 1000
-                                              : CONFIG_EMBPET_TG_SEND_TIMEOUT_MS,
+        /* Connect timeout; request() sets the read timeout of each request after the
+         * connect. Both connections connect alike (kind only says who owns the handle). */
+        .timeout_ms = CONFIG_EMBPET_TG_CONNECT_TIMEOUT_MS,
         .disable_auto_redirect = true,
         .max_authorization_retries = -1,
         .transport_type = HTTP_TRANSPORT_OVER_SSL,
         .crt_bundle_attach = esp_crt_bundle_attach,
-        /* TCP keepalive notices a dead peer on an idle kept session (30 s + 3 x 5 s) */
+        /* TCP probes every 15 s keep a NAT mapping alive during a long poll, and a dead peer
+         * is noticed after 15 s + 3 x 5 s */
         .keep_alive_enable = true,
-        .keep_alive_idle = 30,
+        .keep_alive_idle = 15,
         .keep_alive_interval = 5,
         .keep_alive_count = 3,
     };
@@ -255,8 +259,8 @@ static int read_body(void *ctx, char *buf, size_t cap)
 }
 
 /* Send the request and read the answer, unescaped while it arrives (tg_read_body). */
-static tg_status_t request(tgapi_conn_t *c, const char *body, size_t max_len, tg_resp_t *out,
-                           esp_err_t *net_err)
+static tg_status_t request(tgapi_conn_t *c, const char *body, size_t max_len,
+                           uint32_t read_timeout_ms, tg_resp_t *out, esp_err_t *net_err)
 {
     int blen = (int)strlen(body);
     int64_t clen = 0;
@@ -267,9 +271,15 @@ static tg_status_t request(tgapi_conn_t *c, const char *body, size_t max_len, tg
     for (int attempt = 0;; attempt++) {
         bool kept = c->kept;
         c->kept = false;
+        /* The connect (DNS, TCP, TLS) gets its own short timeout; the request's read
+         * timeout applies once it is open (esp_http_client reads it at each step). */
+        esp_http_client_set_timeout_ms(c->h, CONFIG_EMBPET_TG_CONNECT_TIMEOUT_MS);
         esp_err_t err = esp_http_client_open(c->h, blen);
-        if (err == ESP_OK && esp_http_client_write(c->h, body, blen) != blen) {
-            err = ESP_ERR_HTTP_WRITE_DATA;
+        if (err == ESP_OK) {
+            esp_http_client_set_timeout_ms(c->h, (int)read_timeout_ms);
+            if (esp_http_client_write(c->h, body, blen) != blen) {
+                err = ESP_ERR_HTTP_WRITE_DATA;
+            }
         }
         if (err == ESP_OK) {
             clen = esp_http_client_fetch_headers(c->h);
@@ -287,12 +297,18 @@ static tg_status_t request(tgapi_conn_t *c, const char *body, size_t max_len, tg
         }
         tgapi_conn_close(c);
         *net_err = err;
-        if (!kept || attempt > 0) {
+        uint32_t wait_ms;
+        if (!tg_open_retry(err == ESP_ERR_HTTP_CONNECT ? TG_OPEN_CONNECT : TG_OPEN_IO, kept,
+                           (unsigned)attempt, &wait_ms)) {
             return TG_ERR_NET;
         }
-        /* The server closed the idle session before this request reached it: retry once
-         * on a fresh one. */
-        ESP_LOGD(TAG, "kept-alive session gone (%s), reconnecting", esp_err_to_name(err));
+        /* A kept session the server had closed before this request reached it, or a
+         * one-off connect failure on a fresh one: retry once on the same handle. */
+        ESP_LOGD(TAG, "%s (%s), retrying once", kept ? "kept-alive session gone" : "connect failed",
+                 esp_err_to_name(err));
+        if (wait_ms > 0) {
+            vTaskDelay(pdMS_TO_TICKS(wait_ms));
+        }
     }
 
     int status = esp_http_client_get_status_code(c->h);
@@ -324,8 +340,8 @@ static tg_status_t request(tgapi_conn_t *c, const char *body, size_t max_len, tg
 
 /* Run one call without touching the tg state. *gen is the token generation it ran with. */
 static tg_status_t call_raw(tgapi_conn_t *c, const char *method, const char *body,
-                            size_t max_len, tg_resp_t *out, uint32_t *gen, esp_err_t *net_err,
-                            const char *token)
+                            size_t max_len, uint32_t read_timeout_ms, tg_resp_t *out,
+                            uint32_t *gen, esp_err_t *net_err, const char *token)
 {
     memset(out, 0, sizeof(*out));
     *net_err = ESP_OK;
@@ -334,7 +350,7 @@ static tg_status_t call_raw(tgapi_conn_t *c, const char *method, const char *bod
     xSemaphoreGive(s_lock);
     tg_status_t st = set_url(c, method, token);
     if (st == TG_OK) {
-        st = request(c, body != NULL ? body : "{}", max_len, out, net_err);
+        st = request(c, body != NULL ? body : "{}", max_len, read_timeout_ms, out, net_err);
     }
     return st;
 }
@@ -405,18 +421,25 @@ static void finish(const char *method, tg_status_t st, uint32_t gen, const tg_re
 }
 
 static tg_status_t call(tgapi_conn_t *c, const char *method, const char *body, size_t max_len,
-                        tg_resp_t *out)
+                        uint32_t read_timeout_ms, tg_resp_t *out)
 {
     uint32_t gen;
     esp_err_t net_err;
-    tg_status_t st = call_raw(c, method, body, max_len, out, &gen, &net_err, NULL);
+    tg_status_t st = call_raw(c, method, body, max_len, read_timeout_ms, out, &gen, &net_err,
+                              NULL);
     finish(method, st, gen, out, net_err);
     return st;
 }
 
+tg_status_t tgapi_call_timeout(tgapi_conn_t *c, const char *method, const char *body,
+                               uint32_t read_timeout_ms, tg_resp_t *out)
+{
+    return call(c, method, body, TG_RESP_MAX, read_timeout_ms, out);
+}
+
 tg_status_t tgapi_call(tgapi_conn_t *c, const char *method, const char *body, tg_resp_t *out)
 {
-    return call(c, method, body, TG_RESP_MAX, out);
+    return call(c, method, body, TG_RESP_MAX, SEND_READ_MS, out);
 }
 
 /* Hand the error details to the caller; the response itself is freed. */
@@ -433,7 +456,7 @@ tg_status_t tgapi_get_me(tgapi_conn_t *c, char *bot, size_t cap, tg_resp_t *err)
     tg_resp_t r;
     uint32_t gen;
     esp_err_t net_err;
-    tg_status_t st = call_raw(c, "getMe", NULL, TG_RESP_MAX, &r, &gen, &net_err, NULL);
+    tg_status_t st = call_raw(c, "getMe", NULL, TG_RESP_MAX, SEND_READ_MS, &r, &gen, &net_err, NULL);
     if (st == TG_OK) {
         char name[STATE_BOT_LEN];
         if (tg_parse_bot_username(r.result, name, sizeof(name)) && strlen(name) < cap) {
@@ -459,7 +482,7 @@ tg_status_t tgapi_check_token(tgapi_conn_t *c, const char *token, char *bot, siz
     tg_resp_t r;
     uint32_t gen;
     esp_err_t net_err;
-    tg_status_t st = call_raw(c, "getMe", NULL, TG_RESP_MAX, &r, &gen, &net_err, token);
+    tg_status_t st = call_raw(c, "getMe", NULL, TG_RESP_MAX, SEND_READ_MS, &r, &gen, &net_err, token);
     if (st == TG_OK) {
         char name[STATE_BOT_LEN];
         if (tg_parse_bot_username(r.result, name, sizeof(name)) && strlen(name) < cap) {
@@ -513,7 +536,22 @@ tg_status_t tgapi_get_updates(tgapi_conn_t *c, int64_t offset, tg_resp_t *out)
         memset(out, 0, sizeof(*out));
         return TG_ERR_NO_MEM;
     }
-    tg_status_t st = tgapi_call(c, "getUpdates", body, out);
+    tg_status_t st = tgapi_call_timeout(
+        c, "getUpdates", body, tg_read_timeout_ms(CONFIG_EMBPET_TG_POLL_TIMEOUT_S, SEND_READ_MS),
+        out);
+    cJSON_free(body);
+    return st;
+}
+
+tg_status_t tgapi_get_updates_quick(tgapi_conn_t *c, int64_t offset, tg_resp_t *out)
+{
+    char *body = tg_build_get_updates(offset, TG_UPDATES_LIMIT, 0);
+    if (body == NULL) {
+        memset(out, 0, sizeof(*out));
+        return TG_ERR_NO_MEM;
+    }
+    tg_status_t st = tgapi_call_timeout(c, "getUpdates", body, tg_read_timeout_ms(0, SEND_READ_MS),
+                                        out);
     cJSON_free(body);
     return st;
 }
@@ -525,7 +563,7 @@ tg_status_t tgapi_get_updates_one(tgapi_conn_t *c, int64_t offset, tg_resp_t *ou
         memset(out, 0, sizeof(*out));
         return TG_ERR_NO_MEM;
     }
-    tg_status_t st = call(c, "getUpdates", body, TG_RESP_MAX_ONE, out);
+    tg_status_t st = call(c, "getUpdates", body, TG_RESP_MAX_ONE, tg_read_timeout_ms(0, SEND_READ_MS), out);
     cJSON_free(body);
     if (st == TG_ERR_TOO_LARGE) {
         ESP_LOGW(TAG, "update %lld (%u bytes on the wire) is over the %u-byte cap even alone "

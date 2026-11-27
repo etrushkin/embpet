@@ -158,12 +158,43 @@ tg_status_t tg_read_body(int64_t content_length, size_t max_len, tg_read_fn read
                          tg_body_t *out);
 
 /* How long to wait before the next request after `st`. RETRY: retry_after_s (at least
- * 1 s). NET, TIMEOUT, SERVER: TG_BACKOFF_MIN_MS doubled per consecutive failure (attempt
- * 0 = first failure), capped at TG_BACKOFF_MAX_MS. AUTH: TG_AUTH_RETRY_MS. Anything else
- * (OK, API, TOO_LARGE, NO_TOKEN, BAD_ARG, NO_MEM, TOO_LONG): 0, the caller decides. */
-#define TG_BACKOFF_MIN_MS 1000u
-#define TG_BACKOFF_MAX_MS 30000u
-#define TG_AUTH_RETRY_MS  60000u
+ * 1 s). NET, TIMEOUT: TG_BACKOFF_NET_MIN_MS doubled per consecutive failure (attempt 0 =
+ * first failure: 0.5, 1, 2, 4, 8 s), capped at TG_BACKOFF_NET_MAX_MS (10 s). SERVER (5xx):
+ * TG_BACKOFF_MIN_MS doubled likewise (1, 2, 4 .. 16 s), capped at TG_BACKOFF_MAX_MS (30 s).
+ * AUTH: TG_AUTH_RETRY_MS. Anything else (OK, API, TOO_LARGE, NO_TOKEN, BAD_ARG, NO_MEM,
+ * TOO_LONG): 0, the caller decides. */
+#define TG_BACKOFF_NET_MIN_MS 500u
+#define TG_BACKOFF_NET_MAX_MS 10000u
+#define TG_BACKOFF_MIN_MS     1000u
+#define TG_BACKOFF_MAX_MS     30000u
+#define TG_AUTH_RETRY_MS      60000u
 uint32_t tg_retry_delay_ms(tg_status_t st, uint32_t retry_after_s, unsigned attempt);
+
+/* ------------------------------------------------------------ transport policy */
+
+/* Read timeout of one request. A getUpdates long poll (getupdates_timeout_s > 0) waits
+ * for the answer that long plus TG_POLL_READ_MARGIN_S; every other call (getMe,
+ * deleteWebhook, sendMessage, a timeout-0 getUpdates: getupdates_timeout_s 0) uses
+ * send_ms. The connect (DNS, TCP, TLS handshake) has its own, shorter timeout
+ * (CONFIG_EMBPET_TG_CONNECT_TIMEOUT_MS), so a lost SYN does not hold a poll connection for
+ * the whole long-poll timeout. */
+#define TG_POLL_READ_MARGIN_S 10u
+uint32_t tg_read_timeout_ms(unsigned getupdates_timeout_s, uint32_t send_ms);
+
+/* How a request failed before any response header arrived. */
+typedef enum {
+    TG_OPEN_CONNECT,    /* esp_http_client_open failed to connect (DNS / TCP / TLS) */
+    TG_OPEN_IO,         /* any other failure: request write, reading the headers */
+} tg_open_fail_t;
+
+/* Whether to send the request again after it failed this way, and after how long. `kept`:
+ * the failed attempt ran on a session kept alive from an earlier request (the server may
+ * have closed it meanwhile): retried at once, whatever the failure. A fresh session retries
+ * only a failed connect, after TG_RECONNECT_DELAY_MS, so a one-off DNS / TCP / TLS blip
+ * does not turn tg offline. `attempt` counts the failures of this request so far (0 = the
+ * first): there is at most one extra attempt per request, so a request makes at most two
+ * connects. *delay_ms is written only when it returns true. */
+#define TG_RECONNECT_DELAY_MS 500u
+bool tg_open_retry(tg_open_fail_t why, bool kept, unsigned attempt, uint32_t *delay_ms);
 
 #endif /* EMBPET_TGAPI_CORE_H */
