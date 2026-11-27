@@ -152,7 +152,8 @@ static void job_poll(worker_t *w, job_t *j)
         return;
     }
     tg_resp_t r;
-    j->st = tgapi_call(w->conn, "getUpdates", body, &r);
+    j->st = tgapi_call_timeout(w->conn, "getUpdates", body,
+                                 tg_read_timeout_ms(j->timeout_s, CONFIG_EMBPET_TG_SEND_TIMEOUT_MS), &r);
     cJSON_free(body);
     j->next_offset = j->offset;
     if (j->st == TG_OK) {

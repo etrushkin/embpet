@@ -545,6 +545,16 @@ tg_status_t tg_read_body(int64_t content_length, size_t max_len, tg_read_fn read
 
 /* ------------------------------------------------------------ retry */
 
+/* min * 2^attempt, capped at max. */
+static uint32_t backoff(uint32_t min_ms, uint32_t max_ms, unsigned attempt)
+{
+    uint32_t ms = min_ms;
+    while (attempt-- > 0 && ms < max_ms) {
+        ms *= 2;
+    }
+    return ms < max_ms ? ms : max_ms;
+}
+
 uint32_t tg_retry_delay_ms(tg_status_t st, uint32_t retry_after_s, unsigned attempt)
 {
     switch (st) {
@@ -558,16 +568,38 @@ uint32_t tg_retry_delay_ms(tg_status_t st, uint32_t retry_after_s, unsigned atte
         return retry_after_s * 1000u;
     case TG_ERR_NET:
     case TG_ERR_TIMEOUT:
-    case TG_ERR_SERVER: {
-        uint32_t ms = TG_BACKOFF_MIN_MS;
-        while (attempt-- > 0 && ms < TG_BACKOFF_MAX_MS) {
-            ms *= 2;
-        }
-        return ms < TG_BACKOFF_MAX_MS ? ms : TG_BACKOFF_MAX_MS;
-    }
+        return backoff(TG_BACKOFF_NET_MIN_MS, TG_BACKOFF_NET_MAX_MS, attempt);
+    case TG_ERR_SERVER:
+        return backoff(TG_BACKOFF_MIN_MS, TG_BACKOFF_MAX_MS, attempt);
     case TG_ERR_AUTH:
         return TG_AUTH_RETRY_MS;
     default:
         return 0;
     }
+}
+
+/* ------------------------------------------------------------ transport policy */
+
+uint32_t tg_read_timeout_ms(unsigned getupdates_timeout_s, uint32_t send_ms)
+{
+    if (getupdates_timeout_s == 0) {
+        return send_ms;
+    }
+    return (getupdates_timeout_s + TG_POLL_READ_MARGIN_S) * 1000u;
+}
+
+bool tg_open_retry(tg_open_fail_t why, bool kept, unsigned attempt, uint32_t *delay_ms)
+{
+    if (attempt > 0) {
+        return false;
+    }
+    if (kept) {
+        *delay_ms = 0;
+        return true;
+    }
+    if (why == TG_OPEN_CONNECT) {
+        *delay_ms = TG_RECONNECT_DELAY_MS;
+        return true;
+    }
+    return false;
 }

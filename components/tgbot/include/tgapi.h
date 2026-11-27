@@ -3,14 +3,18 @@
 /* Telegram Bot API client (README 2.1) on esp_http_client with the IDF certificate bundle.
  *
  * Connections: a tgapi_conn_t is one keep-alive HTTPS session to api.telegram.org. Two are
- * meant to exist: the poll connection (getUpdates; HTTP timeout = poll timeout + 10 s),
- * owned by the tg_poll task, and the send connection (everything else; HTTP timeout
- * CONFIG_EMBPET_TG_SEND_TIMEOUT_MS), owned by the tg_send task. A connection is not
- * thread-safe: only its owner task may use it. The timeout applies to each network step
- * (connect, TLS handshake, write, each read), so one call can take several times the
- * timeout, and twice that when a dead kept-alive session is replaced (see tgapi_call): a
- * caller with a deadline (`tg send`: 10 s) must enforce it itself. Sessions idle for more
- * than 60 s are reconnected rather than reused, and TCP keepalive is on. Close both
+ * meant to exist: the poll connection (getUpdates), owned by the tg_poll task, and the send
+ * connection (everything else), owned by the tg_send task. A connection is not thread-safe:
+ * only its owner task may use it. Timeouts are per request, not per connection: the connect
+ * (DNS, TCP, TLS handshake) uses CONFIG_EMBPET_TG_CONNECT_TIMEOUT_MS; once connected, each
+ * write and read uses the read timeout of the call: poll timeout + 10 s for a long poll
+ * (tgapi_get_updates), CONFIG_EMBPET_TG_SEND_TIMEOUT_MS for everything else, a timeout-0
+ * getUpdates included (tgapi_get_updates_quick; tg_read_timeout_ms). Each network step has
+ * its own timeout, so one call can take several times it, and a connect failure or a dead
+ * kept-alive session is retried once (see tgapi_call): a caller with a deadline (`tg send`:
+ * 10 s) must enforce it itself. Sessions idle for more than 60 s are reconnected rather
+ * than reused. TCP keepalive probes start after 15 s idle (every 5 s, 3 misses), which
+ * keeps a NAT mapping alive during a long poll. Close both
  * connections on Wi-Fi down (tgapi_conn_close) to give their TLS memory back.
  *
  * Methods: pass only real Bot API method names. Telegram answers 404 for an unknown method
@@ -67,12 +71,20 @@ void tgapi_conn_close(tgapi_conn_t *c);
  * become UTF-8) into a buffer of min(Content-Length, TG_RESP_MAX + 1 + TG_UNESC_HOLD) bytes,
  * freed before returning. A body whose unescaped size is larger than TG_RESP_MAX closes the
  * session and gives TG_ERR_TOO_LARGE.
- * A failure on a kept-alive session that the server had already closed (connection reset
- * or closed before any response header) is retried once on a fresh session; a timeout is
- * never retried, so a request is not sent twice because the server was slow. The retry
- * can still duplicate a sendMessage if the server processed the request and then reset
- * the connection before answering (rare; owners may see a message twice). */
+ * Retry (tg_open_retry): at most one extra attempt per request, on the same handle. A
+ * failure on a kept-alive session that the server had already closed (connection reset or
+ * closed before any response header) is retried at once on a fresh session; a failed
+ * connect on a fresh session (ESP_ERR_HTTP_CONNECT) is retried after
+ * TG_RECONNECT_DELAY_MS, so a one-off DNS / TCP / TLS blip does not turn tg offline. A
+ * timeout is never retried, so a request is not sent twice because the server was slow.
+ * The retry after a failure past the connect can still duplicate a sendMessage if the server
+ * processed the request and then reset the connection before answering (rare; owners may
+ * see a message twice); a failed connect sent nothing.
+ * tgapi_call reads with CONFIG_EMBPET_TG_SEND_TIMEOUT_MS; tgapi_call_timeout with the given
+ * read timeout (ms), for a long-poll getUpdates (tg_read_timeout_ms). */
 tg_status_t tgapi_call(tgapi_conn_t *c, const char *method, const char *body, tg_resp_t *out);
+tg_status_t tgapi_call_timeout(tgapi_conn_t *c, const char *method, const char *body,
+                               uint32_t read_timeout_ms, tg_resp_t *out);
 
 /* The calls below use tgapi_call and free the response themselves; `err` (may be NULL)
  * receives the error details (root is always NULL on return). */
@@ -103,10 +115,16 @@ tg_status_t tgapi_send_message(tgapi_conn_t *c, int64_t chat_id, const char *act
                                tg_resp_t *err);
 
 /* getUpdates(offset, limit TG_UPDATES_LIMIT, timeout CONFIG_EMBPET_TG_POLL_TIMEOUT_S,
- * allowed_updates ["message"]). Use the poll connection. On TG_OK out->result is the
+ * allowed_updates ["message"]), read timeout poll timeout + 10 s. Use the poll connection. On TG_OK out->result is the
  * update array; the caller frees it with tg_resp_free. On TG_ERR_TOO_LARGE (over
  * TG_RESP_MAX unescaped) the body is dropped: retry with tgapi_get_updates_one. */
 tg_status_t tgapi_get_updates(tgapi_conn_t *c, int64_t offset, tg_resp_t *out);
+
+/* getUpdates(offset, limit TG_UPDATES_LIMIT, timeout 0): answers at once, with the send
+ * timeout (not the long poll's) for reading. The poller uses it after a failure or a Wi-Fi
+ * drop, so tg is online again as soon as Telegram is reachable. Like tgapi_get_updates
+ * otherwise. */
+tg_status_t tgapi_get_updates_quick(tgapi_conn_t *c, int64_t offset, tg_resp_t *out);
 
 /* getUpdates(offset, limit 1, timeout 0) with the larger cap TG_RESP_MAX_ONE, which fits
  * the largest possible owner reply quoting the largest possible bot message once unescaped

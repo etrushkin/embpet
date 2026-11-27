@@ -1056,17 +1056,56 @@ static void test_retry_delay(void)
     TEST_ASSERT_EQUAL_UINT32(17000, tg_retry_delay_ms(TG_ERR_RETRY, 17, 0));
     TEST_ASSERT_EQUAL_UINT32(1000, tg_retry_delay_ms(TG_ERR_RETRY, 0, 5));
     TEST_ASSERT_EQUAL_UINT32(86400000u, tg_retry_delay_ms(TG_ERR_RETRY, 4000000000u, 0));
-    static const uint32_t want[] = {1000, 2000, 4000, 8000, 16000, 30000, 30000};
-    for (unsigned a = 0; a < sizeof(want) / sizeof(want[0]); a++) {
-        TEST_ASSERT_EQUAL_UINT32(want[a], tg_retry_delay_ms(TG_ERR_NET, 0, a));
-        TEST_ASSERT_EQUAL_UINT32(want[a], tg_retry_delay_ms(TG_ERR_TIMEOUT, 0, a));
-        TEST_ASSERT_EQUAL_UINT32(want[a], tg_retry_delay_ms(TG_ERR_SERVER, 0, a));
+    static const uint32_t net[] = {500, 1000, 2000, 4000, 8000, 10000, 10000};
+    static const uint32_t srv[] = {1000, 2000, 4000, 8000, 16000, 30000, 30000};
+    for (unsigned a = 0; a < sizeof(net) / sizeof(net[0]); a++) {
+        TEST_ASSERT_EQUAL_UINT32(net[a], tg_retry_delay_ms(TG_ERR_NET, 0, a));
+        TEST_ASSERT_EQUAL_UINT32(net[a], tg_retry_delay_ms(TG_ERR_TIMEOUT, 0, a));
+        TEST_ASSERT_EQUAL_UINT32(srv[a], tg_retry_delay_ms(TG_ERR_SERVER, 0, a));
     }
-    TEST_ASSERT_EQUAL_UINT32(30000, tg_retry_delay_ms(TG_ERR_NET, 0, 4000000000u));
+    TEST_ASSERT_EQUAL_UINT32(10000, tg_retry_delay_ms(TG_ERR_NET, 0, 4000000000u));
+    TEST_ASSERT_EQUAL_UINT32(10000, tg_retry_delay_ms(TG_ERR_TIMEOUT, 0, 4000000000u));
+    TEST_ASSERT_EQUAL_UINT32(30000, tg_retry_delay_ms(TG_ERR_SERVER, 0, 4000000000u));
     TEST_ASSERT_EQUAL_UINT32(TG_AUTH_RETRY_MS, tg_retry_delay_ms(TG_ERR_AUTH, 0, 0));
     TEST_ASSERT_EQUAL_UINT32(0, tg_retry_delay_ms(TG_OK, 5, 3));
     TEST_ASSERT_EQUAL_UINT32(0, tg_retry_delay_ms(TG_ERR_API, 5, 3));
     TEST_ASSERT_EQUAL_UINT32(0, tg_retry_delay_ms(TG_ERR_TOO_LARGE, 0, 0));
+}
+
+static void test_read_timeout(void)
+{
+    /* long poll: its timeout + the margin; everything else (timeout 0): the send timeout */
+    TEST_ASSERT_EQUAL_UINT32(60000, tg_read_timeout_ms(50, 10000));
+    TEST_ASSERT_EQUAL_UINT32(11000, tg_read_timeout_ms(1, 10000));
+    TEST_ASSERT_EQUAL_UINT32(10000, tg_read_timeout_ms(0, 10000));
+    TEST_ASSERT_EQUAL_UINT32(3000, tg_read_timeout_ms(0, 3000));
+    TEST_ASSERT_EQUAL_UINT32(310000, tg_read_timeout_ms(300, 10000));
+}
+
+static void test_open_retry(void)
+{
+    uint32_t d = 12345;
+    /* fresh session: only a failed connect is retried, after the reconnect delay */
+    TEST_ASSERT_TRUE(tg_open_retry(TG_OPEN_CONNECT, false, 0, &d));
+    TEST_ASSERT_EQUAL_UINT32(TG_RECONNECT_DELAY_MS, d);
+    TEST_ASSERT_EQUAL_UINT32(500, d);
+    d = 12345;
+    TEST_ASSERT_FALSE(tg_open_retry(TG_OPEN_IO, false, 0, &d));
+    TEST_ASSERT_EQUAL_UINT32(12345, d);         /* untouched when not retried */
+    /* kept session gone: retried at once, whatever the failure */
+    TEST_ASSERT_TRUE(tg_open_retry(TG_OPEN_IO, true, 0, &d));
+    TEST_ASSERT_EQUAL_UINT32(0, d);
+    TEST_ASSERT_TRUE(tg_open_retry(TG_OPEN_CONNECT, true, 0, &d));
+    TEST_ASSERT_EQUAL_UINT32(0, d);
+    /* at most one extra attempt per request, so the two paths do not add up */
+    for (unsigned a = 1; a < 4; a++) {
+        d = 12345;
+        TEST_ASSERT_FALSE(tg_open_retry(TG_OPEN_CONNECT, false, a, &d));
+        TEST_ASSERT_FALSE(tg_open_retry(TG_OPEN_CONNECT, true, a, &d));
+        TEST_ASSERT_FALSE(tg_open_retry(TG_OPEN_IO, true, a, &d));
+        TEST_ASSERT_FALSE(tg_open_retry(TG_OPEN_IO, false, a, &d));
+        TEST_ASSERT_EQUAL_UINT32(12345, d);
+    }
 }
 
 static void test_status_names(void)
@@ -1121,6 +1160,8 @@ int main(void)
     RUN_TEST(test_read_body_read_error_or_end);
     RUN_TEST(test_read_body_too_large);
     RUN_TEST(test_retry_delay);
+    RUN_TEST(test_read_timeout);
+    RUN_TEST(test_open_retry);
     RUN_TEST(test_status_names);
     return UNITY_END();
 }
